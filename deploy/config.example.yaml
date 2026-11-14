@@ -311,7 +311,8 @@ gateway:
   # 未启用 502 同账号重试的账号保留 8 MiB 暂存限制。
   openai_first_output_timeout_seconds: 0
   # OpenAI pools with configured 502 retries: native first-output line guard (32 MiB),
-  # and total private retry staging (64 MiB). Zero selects the defaults.
+  # and private pre-output staging (64 MiB). Useful output streams immediately.
+  # Zero selects the defaults.
   # Other accounts keep their existing limits. gateway.max_line_size still applies.
   openai_stream_retry_max_line_bytes: 33554432
   openai_stream_retry_max_buffer_bytes: 67108864

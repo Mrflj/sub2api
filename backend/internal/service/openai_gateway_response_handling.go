@@ -67,7 +67,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	guardFirstOutput := firstOutputTimeout > 0
 	stageFirstOutput := account != nil && account.Platform == PlatformOpenAI
-	bufferRetryAttempt := openAIStreamBuffersConfiguredRetry(account)
+	configuredStreamRetry := openAIStreamConfiguredRetryEnabled(account)
 	earlyPluginEvents := s.openAIPluginSSEEarlyEvents(resp, account)
 	pluginEarlyCommitted := false
 	var attemptResponseHeaders http.Header
@@ -184,14 +184,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	var firstOutputScanGuard atomic.Bool
 	firstOutputScanGuard.Store(stageFirstOutput)
 	guardedLineLimit := openAIFirstOutputStageMaxBytes + openAIFirstOutputScannerFramingAllowance
-	if bufferRetryAttempt {
+	if configuredStreamRetry {
 		guardedLineLimit, _ = s.openAIStreamRetryLimits()
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanBuf := getSSEScannerBuf64K()
 	scanner.Buffer(scanBuf[:0], maxLineSize)
 	if stageFirstOutput {
-		if bufferRetryAttempt {
+		if configuredStreamRetry {
 			scanner.Split(openAIFirstOutputDynamicScanLines(&firstOutputScanGuard, guardedLineLimit))
 		} else {
 			scanner.Split(openAIFirstOutputDynamicScanLines(&firstOutputScanGuard))
@@ -275,7 +275,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// 注意：OpenAI `/v1/responses` streaming 事件必须符合 OpenAI Responses schema；
 	// 否则下游 SDK（例如 OpenCode）会因为类型校验失败而报错。
 	errorEventSent := false
-	clientDisconnected := OpenAIHeaderWaitDisconnected(c) // Preserve heartbeat transport failure while draining usage.
+	clientDisconnected := OpenAIHeaderWaitDisconnected(c) || openAIStreamClientCanceled(c) // Preserve downstream failure while draining usage.
 	sawTerminalEvent := false
 	sawFailedEvent := false
 	sawBareError := false
@@ -323,7 +323,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			} else {
 				failoverErr := s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, nil, message)
 				failoverErr.SafeToFailoverAfterWrite = true
-				failoverErr.ConfiguredStreamRetry = bufferRetryAttempt
+				failoverErr.ConfiguredStreamRetry = configuredStreamRetry
 				streamEarlyErr = failoverErr
 			}
 			_ = resp.Body.Close()
@@ -341,12 +341,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			observeOpenAIHTTPProgress(ctx)
 		}
 		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted) || completedEarlyMetadata
-		if bufferRetryAttempt && !sawTerminalEvent {
-			shouldFlush = false
-		}
 		eventInProgress = false
 		if !clientDisconnected {
-			if (eventStartsClientOutput && (!bufferRetryAttempt || sawTerminalEvent)) || completedEarlyMetadata {
+			if eventStartsClientOutput || completedEarlyMetadata {
 				applyAttemptResponseHeaders()
 			}
 			if shouldFlush {
@@ -402,7 +399,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return
 		}
 		errorEventSent = true
-		if bufferRetryAttempt && firstOutputStage != nil && !firstOutputStage.closed {
+		if configuredStreamRetry && firstOutputStage != nil && !firstOutputStage.closed {
 			_ = firstOutputStage.Close()
 		}
 		discardIncompletePluginEvent()
@@ -462,7 +459,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 	}
 	flushPending := func(disconnectMessage string) {
-		if bufferRetryAttempt && (!terminalSuccessful || sawFailedEvent) {
+		if configuredStreamRetry && !clientOutputStarted && (!terminalSuccessful || sawFailedEvent) {
 			return
 		}
 		if clientDisconnected || pendingBytes() == 0 {
@@ -548,7 +545,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				"OpenAI SSE line exceeds guarded first-output limit",
 			)
 			failoverErr.SafeToFailoverAfterWrite = true
-			failoverErr.ConfiguredStreamRetry = bufferRetryAttempt
+			failoverErr.ConfiguredStreamRetry = configuredStreamRetry
 			return resultWithUsage(), failoverErr, true
 		}
 		if errors.Is(scanErr, bufio.ErrTooLong) && privateFirstOutput {
@@ -558,7 +555,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				"OpenAI SSE line exceeds guarded first-output limit",
 			)
 			failoverErr.SafeToFailoverAfterWrite = true
-			failoverErr.ConfiguredStreamRetry = bufferRetryAttempt
+			failoverErr.ConfiguredStreamRetry = configuredStreamRetry
 			return resultWithUsage(), failoverErr, true
 		}
 		if sawTerminalEvent {
@@ -609,6 +606,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		return resultWithUsage(), fmt.Errorf("stream read error: %w", scanErr), true
 	}
 	processSSELineRaw := func(line string, queueDrained bool) {
+		clientDisconnected = clientDisconnected || openAIStreamClientCanceled(c)
 		if streamEarlyErr != nil {
 			return
 		}
@@ -784,7 +782,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						}
 					}
 				}
-				if bufferRetryAttempt && firstOutputStage != nil && !firstOutputStage.closed {
+				if configuredStreamRetry && firstOutputStage != nil && !firstOutputStage.closed {
 					if err := firstOutputStage.Close(); err != nil {
 						logger.LegacyPrintf("service.openai_gateway", "OpenAI failed retry staging cleanup failed: account=%d error=%v", account.ID, err)
 					}
@@ -867,7 +865,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
-			if startsClientOutput && firstClientOutputEvent == "" {
+			if startsClientOutput && !forceFlushFailedEvent && firstClientOutputEvent == "" {
 				firstClientOutputEvent = eventType
 				firstClientOutputItemType = gjson.GetBytes(dataBytes, "item.type").String()
 			}
@@ -891,14 +889,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			if stageFirstOutput {
 				eventStartsClientOutput = eventStartsClientOutput || startsClientOutput
-				eventStartsUpstreamProgress = eventStartsUpstreamProgress || startsClientOutput || openAIStreamDataIsOpaquePreamble(data, eventType)
+				eventStartsUpstreamProgress = eventStartsUpstreamProgress || (!forceFlushFailedEvent && startsClientOutput) || openAIStreamDataIsOpaquePreamble(data, eventType)
 				eventStartsTTFTOutput = eventStartsTTFTOutput || startsTTFTOutput
 				eventStartsLegacyTTFTOutput = eventStartsLegacyTTFTOutput || startsLegacyTTFTOutput
 				if startsClientOutput {
 					firstOutputScanGuard.Store(false)
 				}
 			}
-			if startsClientOutput && !openAIStreamEventTypeIsTerminal(eventType) {
+			if startsClientOutput && !forceFlushFailedEvent && !openAIStreamEventTypeIsTerminal(eventType) {
 				responsesSemanticOutputSeen = true
 			}
 			// OpenAI Responses streams that terminate with an empty
@@ -1102,7 +1100,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// 独立 goroutine 读取上游，避免读取阻塞影响 keepalive/超时处理
 	// Guarded and retry-buffered attempts limit queued tokens so larger private
 	// events do not multiply by the legacy channel depth.
-	events := make(chan scanEvent, openAIFirstOutputEventQueueSize(guardFirstOutput || bufferRetryAttempt))
+	events := make(chan scanEvent, openAIFirstOutputEventQueueSize(guardFirstOutput || configuredStreamRetry))
 	done := make(chan struct{})
 	sendEvent := func(ev scanEvent) bool {
 		if firstOutputScanGuard.Load() {
@@ -1233,7 +1231,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if clientDisconnected || failureDelivered {
 				continue
 			}
-			if eventInProgress && !bufferRetryAttempt {
+			if eventInProgress && (firstOutputStage == nil || firstOutputStage.closed || clientOutputStarted) {
 				continue
 			}
 			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
@@ -1348,10 +1346,14 @@ func openAICompatPayloadWithEventType(payload, eventType string) string {
 	if eventType == "" || strings.TrimSpace(payload) == "" || strings.TrimSpace(payload) == "[DONE]" {
 		return payload
 	}
-	if strings.TrimSpace(gjson.Get(payload, "type").String()) != "" {
-		return payload
+	payloadType := strings.TrimSpace(gjson.Get(payload, "type").String())
+	resolvedType := effectiveOpenAISSEEventType([]byte(payload), eventType)
+	if payloadType != "" {
+		if resolvedType == payloadType || (resolvedType != "error" && resolvedType != "response.failed") {
+			return payload
+		}
 	}
-	patched, err := sjson.Set(payload, "type", eventType)
+	patched, err := sjson.Set(payload, "type", resolvedType)
 	if err != nil {
 		return payload
 	}
@@ -1359,6 +1361,15 @@ func openAICompatPayloadWithEventType(payload, eventType string) string {
 }
 
 func effectiveOpenAISSEEventType(payload []byte, eventType string) string {
+	if failureType := openAIStreamPayloadFailureType(payload); failureType != "" {
+		return failureType
+	}
+	switch strings.TrimSpace(eventType) {
+	case "error", "response.error":
+		return "error"
+	case "response.failed":
+		return "response.failed"
+	}
 	if payloadType := strings.TrimSpace(gjson.GetBytes(payload, "type").String()); payloadType != "" {
 		return payloadType
 	}

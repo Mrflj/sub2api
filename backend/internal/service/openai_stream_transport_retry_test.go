@@ -35,19 +35,30 @@ func TestOpenAIStreamTransportErrorEventsRetryConfiguredAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for name, payload := range openAIStreamTransportRetryPayloads() {
 		for _, path := range []string{"native", "passthrough", "messages", "chat"} {
-			for _, output := range []string{"reasoning", "tool", "text"} {
+			for _, output := range []string{"metadata", "reasoning", "tool", "text"} {
 				t.Run(name+"/"+path+"/"+output, func(t *testing.T) {
 					c, rec := newOpenAIConfiguredRetryContext()
 					cfg := &config.Config{}
 					cfg.Gateway.LogUpstreamErrorBody = true
 					cfg.Gateway.LogUpstreamErrorBodyMaxBytes = 2048
+					preamble := configuredRetryEvent(`{"type":"response.created","response":{"id":"retry_private","status":"in_progress"}}`)
+					if output != "metadata" {
+						preamble += configuredRetryOutput(output)
+					}
 					resp := &http.Response{
 						StatusCode: http.StatusOK,
 						Header:     http.Header{"X-Request-Id": []string{"stream-transport-retry"}},
-						Body:       io.NopCloser(strings.NewReader(configuredRetryOutput(output) + configuredRetryEvent(payload))),
+						Body:       io.NopCloser(strings.NewReader(preamble + configuredRetryEvent(payload))),
 					}
 					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: cfg}, c, resp, newConfiguredStreamRetryAccount(), path)
 					var failover *UpstreamFailoverError
+					if output != "metadata" {
+						require.Error(t, err)
+						require.NotErrorAs(t, err, &failover)
+						require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
+						require.NotContains(t, rec.Body.String(), "response.completed")
+						return
+					}
 					require.ErrorAs(t, err, &failover)
 					require.Equal(t, http.StatusBadGateway, failover.StatusCode)
 					require.True(t, failover.RetryableOnSameAccount)

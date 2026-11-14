@@ -1340,23 +1340,40 @@ func openAIStreamDataIsOpaquePreamble(data, eventType string) bool {
 		!openAIStreamAddedEventStartsClientOutput(payload, eventType)
 }
 
+// Failure envelopes are control messages, even when a relay incorrectly
+// attaches an output event type or a delta/message field to the same payload.
+// Only inspect protocol-level error fields; model text containing "error" is
+// still ordinary output.
+func openAIStreamPayloadFailureType(payload []byte) string {
+	if !gjson.ValidBytes(payload) {
+		return ""
+	}
+	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
+	case "response.failed":
+		return "response.failed"
+	case "error", "response.error":
+		return "error"
+	}
+	responseError := gjson.GetBytes(payload, "response.error")
+	if (responseError.Exists() && responseError.Type != gjson.Null) ||
+		gjson.GetBytes(payload, "response.status").String() == "failed" {
+		return "response.failed"
+	}
+	if value := gjson.GetBytes(payload, "error"); value.Exists() && value.Type != gjson.Null {
+		return "error"
+	}
+	return ""
+}
+
 func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
-	if trimmed == "" {
+	if trimmed == "" || openAIStreamPayloadFailureType([]byte(trimmed)) != "" {
 		return false
 	}
 	field := ""
 	switch strings.TrimSpace(eventType) {
-	case "response.failed":
+	case "response.failed", "error", "response.error":
 		return false
-	case "error":
-		// 上游降载/瞬时故障会先推 {"type":"error"} 帧、再以 response.failed 收尾。
-		// 可重试类错误帧不能算客户端输出：一旦把它当首输出 flush，
-		// clientOutputStarted 即被固化，随后的 failed 事件永远进不了 pre-output
-		// failover 分支，只能把致命错误原样转发给客户端。不可重试类
-		// （content_policy / invalid_request 等）维持原样转发，保留上游错误细节。
-		payload := []byte(trimmed)
-		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
 	case "response.output_item.added", "response.output_item.done", "response.content_part.added", "response.reasoning_summary_part.added",
 		"response.content_part.done", "response.reasoning_summary_part.done":
 		return openAIStreamAddedEventStartsClientOutput([]byte(trimmed), eventType)
@@ -1368,9 +1385,15 @@ func openAIStreamDataStartsClientOutput(data, eventType string) bool {
 	case "response.refusal.done":
 		field = "refusal"
 	}
-	if field != "" && gjson.Valid(trimmed) {
+	if field == "" && strings.HasSuffix(strings.TrimSpace(eventType), ".delta") {
+		field = "delta"
+	}
+	if field != "" {
+		if !gjson.Valid(trimmed) {
+			return false
+		}
 		value := gjson.Get(trimmed, field)
-		return value.Type != gjson.String || value.String() != ""
+		return value.Type == gjson.String && value.String() != ""
 	}
 	return !openAIStreamEventIsMetadata(eventType)
 }
@@ -1393,16 +1416,20 @@ func openAIStreamItemHasVisibleOutput(item gjson.Result) bool {
 // but TTFT should start only when the stream carries content a client can use.
 func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
-	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
+	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) ||
+		openAIStreamPayloadFailureType([]byte(trimmed)) != "" {
 		return false
 	}
 	eventType = strings.TrimSpace(eventType)
+	if eventType == "error" || eventType == "response.error" || eventType == "response.failed" {
+		return false
+	}
 	if eventType == "" {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
 	}
 	if strings.HasSuffix(eventType, ".delta") {
 		delta := gjson.Get(trimmed, "delta")
-		return delta.Exists() && delta.String() != ""
+		return delta.Type == gjson.String && delta.String() != ""
 	}
 	switch eventType {
 	case "response.output_text.done",
@@ -1435,10 +1462,14 @@ func openAIStreamDataStartsVisibleOutput(data, eventType string) bool {
 // openAIStreamDataStartsSemanticTTFT follows the shared Responses semantic endpoint.
 func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
-	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) {
+	if trimmed == "" || trimmed == "[DONE]" || !gjson.Valid(trimmed) ||
+		openAIStreamPayloadFailureType([]byte(trimmed)) != "" {
 		return false
 	}
 	eventType = strings.TrimSpace(eventType)
+	if eventType == "error" || eventType == "response.error" || eventType == "response.failed" {
+		return false
+	}
 	if eventType == "" {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
 	}
@@ -1449,7 +1480,7 @@ func openAIStreamDataStartsSemanticTTFT(data, eventType string) bool {
 // as Chat Completions priority sampling.
 func openAIStreamDataStartsLegacySemanticTTFT(data, eventType string) bool {
 	trimmed := strings.TrimSpace(data)
-	if trimmed == "" || trimmed == "[DONE]" {
+	if trimmed == "" || trimmed == "[DONE]" || openAIStreamPayloadFailureType([]byte(trimmed)) != "" {
 		return false
 	}
 	eventType = strings.TrimSpace(eventType)
@@ -1457,11 +1488,8 @@ func openAIStreamDataStartsLegacySemanticTTFT(data, eventType string) bool {
 		eventType = strings.TrimSpace(gjson.Get(trimmed, "type").String())
 	}
 	switch eventType {
-	case "response.failed":
+	case "response.failed", "error", "response.error":
 		return false
-	case "error":
-		payload := []byte(trimmed)
-		return !openAIStreamFailedEventShouldFailover(payload, extractOpenAISSEErrorMessage(payload))
 	default:
 		return !openAIStreamEventIsMetadata(eventType)
 	}
@@ -2237,7 +2265,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	ctx = requesttiming.ResponseContext(ctx, resp)
 	ttftMode := s.openAITTFTMode(ctx)
 	requesttiming.Mode(ctx, ttftMode)
-	clientDisconnected := OpenAIHeaderWaitDisconnected(c)
+	clientDisconnected := OpenAIHeaderWaitDisconnected(c) || openAIStreamClientCanceled(c)
 	sawDone := false
 	sawTerminalEvent := false
 	sawFailedEvent := false
@@ -2266,10 +2294,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	pendingLines := make([]string, 0, 8)
 	var pendingLineBytes int64
-	bufferRetryAttempt := openAIStreamBuffersConfiguredRetry(account)
+	configuredStreamRetry := openAIStreamConfiguredRetryEnabled(account)
 	pendingLineLimit := int64(openAIFirstOutputStageMaxBytes)
 	var retryStage *openAIFirstOutputStage
-	if bufferRetryAttempt {
+	if configuredStreamRetry {
 		_, pendingLineLimit = s.openAIStreamRetryLimits()
 		retryStage = s.newOpenAIStreamOutputStage(account)
 		defer func() {
@@ -2431,7 +2459,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	}
 	streamInterval := s.openAIPassthroughStreamDataInterval(imageBillingModel)
 	heartbeat := func() {
-		if clientDisconnected || (clientOutputStarted && !pluginEarlyCommitted) || (!bufferRetryAttempt && semanticOutputSeen) || failureDelivered {
+		if clientDisconnected || (clientOutputStarted && !pluginEarlyCommitted) || semanticOutputSeen || failureDelivered {
 			return
 		}
 		n, err := w.Write([]byte(": keepalive\n\n"))
@@ -2468,6 +2496,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	upstreamReadCtx, releaseUpstreamReadCtx := openAIPassthroughContext(ctx, account)
 	defer releaseUpstreamReadCtx()
 	for documentScanner.Next(upstreamReadCtx, streamInterval, keepaliveCh, heartbeat) {
+		clientDisconnected = clientDisconnected || openAIStreamClientCanceled(c)
 		line := documentScanner.Text()
 		pluginEventOpen = line != ""
 		if _, dataLine := extractOpenAISSEDataLine(line); !dataLine {
@@ -2637,7 +2666,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if earlyPluginEvents && !forceFlushFailedEvent {
 				lineStartsClientOutput = len(metricPayload) > 0 && openAIStreamDataStartsClientOutput(string(metricPayload), metricType)
 			}
-			if lineStartsClientOutput && firstClientOutputEvent == "" {
+			if lineStartsClientOutput && !forceFlushFailedEvent && firstClientOutputEvent == "" {
 				firstClientOutputEvent = eventType
 				firstClientOutputItemType = gjson.GetBytes(dataBytes, "item.type").String()
 			}
@@ -2648,13 +2677,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if lineStartsClientOutput || opaquePreamble {
 				documentScanner.firstOutputDeadline = time.Time{}
 			}
-			if lineStartsClientOutput && !bufferRetryAttempt {
+			if lineStartsClientOutput {
 				stopKeepalive()
 			}
 			if opaquePreamble {
 				budgetProgressPending = true
 			}
-			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
+			if lineStartsClientOutput && !forceFlushFailedEvent && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
 				budgetProgressPending = true
 			}
@@ -2718,8 +2747,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				pluginPendingBytes += lineBytes
 				continue
 			}
-			holdAttempt := bufferRetryAttempt && !sawTerminalEvent
-			if !clientOutputStarted && (!lineStartsClientOutput || holdAttempt) && (line != "" || !earlyMetadataPending) {
+			if !clientOutputStarted && !lineStartsClientOutput && (line != "" || !earlyMetadataPending) {
 				lineBytes := int64(len(line)) + 1
 				if lineBytes > pendingLineLimit-pendingLineBytes {
 					return resultWithUsage(), s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI passthrough pre-output staging limit exceeded")
@@ -2814,7 +2842,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		}
 		if errors.Is(err, bufio.ErrTooLong) {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, err)
-			if bufferRetryAttempt && !clientDisconnected && !openAIStreamClientOutputStarted(c, clientOutputStarted) && c.Request.Context().Err() == nil {
+			if configuredStreamRetry && !clientDisconnected && !openAIStreamClientOutputStarted(c, clientOutputStarted) && c.Request.Context().Err() == nil {
 				return resultWithUsage(), s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI SSE line exceeds configured maximum before output")
 			}
 			return resultWithUsage(), err

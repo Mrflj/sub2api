@@ -1208,8 +1208,8 @@ type GatewayConfig struct {
 	OpenAIUploadTimeoutSeconds int `mapstructure:"openai_upload_timeout_seconds"`
 	// Shared HTTP budget before the first complete model output event; zero disables it.
 	OpenAIPreOutputBudgetSeconds int `mapstructure:"openai_pre_output_budget_seconds"`
-	// Only for OpenAI pools buffering configured 502 retries. The line limit
-	// applies before semantic output; existing post-output reader limits remain.
+	// Private preamble limits for OpenAI pools with configured 502 retries.
+	// Commit on useful output; existing post-output reader limits remain.
 	OpenAIStreamRetryMaxLineBytes   int   `mapstructure:"openai_stream_retry_max_line_bytes"`
 	OpenAIStreamRetryMaxBufferBytes int64 `mapstructure:"openai_stream_retry_max_buffer_bytes"`
 	// OpenAIHighEffortFirstOutputTimeoutSeconds: high/xhigh/max 推理的首个语义输出超时（秒）。

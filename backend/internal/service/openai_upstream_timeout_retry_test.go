@@ -38,6 +38,12 @@ func TestOpenAIUpstreamTimeoutConfiguredRetry(t *testing.T) {
 				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
 				var failover *UpstreamFailoverError
+				if prelude != "metadata" {
+					require.Error(t, err)
+					require.NotErrorAs(t, err, &failover)
+					require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[prelude])
+					return
+				}
 				require.ErrorAs(t, err, &failover)
 				require.Equal(t, http.StatusBadGateway, failover.StatusCode)
 				require.True(t, failover.RetryableOnSameAccount)
@@ -84,12 +90,23 @@ func TestOpenAIChatConfiguredRetryReadFailures(t *testing.T) {
 						require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
 						require.NotNil(t, result)
 						require.Contains(t, rec.Body.String(), "PROTOCOL_ERROR")
-						for _, staged := range []string{"private answer", "private reasoning", "lookup"} {
-							require.NotContains(t, rec.Body.String(), staged)
+						if output == "metadata" {
+							for _, staged := range []string{"private answer", "private reasoning", "lookup"} {
+								require.NotContains(t, rec.Body.String(), staged)
+							}
+						} else {
+							require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
 						}
 						ops, marked := GetOpsStreamError(c)
 						require.True(t, marked)
 						require.NotNil(t, ops.TransportFailure)
+						return
+					}
+					if output != "metadata" {
+						require.Error(t, err)
+						require.NotErrorAs(t, err, &failover)
+						require.NotNil(t, result)
+						require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
 						return
 					}
 					require.ErrorAs(t, err, &failover)
@@ -152,7 +169,11 @@ func TestOpenAIChatConfiguredRetryReadFailureGuards(t *testing.T) {
 				case "response_too_large":
 					readErr = ErrUpstreamResponseBodyTooLarge
 				}
-				resp.Body = &openAIChatStreamReadErrorCloser{payload: []byte(configuredRetryOutput("text")), err: readErr}
+				privatePreamble := configuredRetryEvent(`{"type":"response.created","response":{"id":"guard_private","status":"in_progress"}}`)
+				if guard == "non_pool" || guard == "zero_retries" || guard == "502_not_configured" {
+					privatePreamble += configuredRetryOutput("text")
+				}
+				resp.Body = &openAIChatStreamReadErrorCloser{payload: []byte(privatePreamble), err: readErr}
 				result, err := (&OpenAIGatewayService{cfg: cfg}).handleChatStreamingResponse(resp, c, account, "gpt-5.6-terra", "gpt-5.6-terra", "gpt-6-luna", time.Now(), 32)
 				var failover *UpstreamFailoverError
 				require.Error(t, err)

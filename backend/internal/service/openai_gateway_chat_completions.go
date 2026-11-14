@@ -914,14 +914,14 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 	var usage OpenAIUsage
 	var firstTokenMs *int
-	clientDisconnected := false
+	clientDisconnected := openAIStreamClientCanceled(c)
 	clientOutputStarted := false
 	pendingSSE := make([]string, 0, 4)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
 	var retryStage *openAIFirstOutputStage
-	if openAIStreamBuffersConfiguredRetry(account) {
+	if openAIStreamConfiguredRetryEnabled(account) {
 		retryStage = s.newOpenAIStreamOutputStage(account)
 		defer func() {
 			if err := retryStage.Close(); err != nil {
@@ -989,6 +989,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	}
 
 	processDataLine := func(payload string) bool {
+		clientDisconnected = clientDisconnected || openAIStreamClientCanceled(c)
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 		if countSearch {
 			searchCount += countGrokNativeSearchCallsInSSEDataDedup([]byte(payload), streamSearchSeen)
@@ -1002,6 +1003,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			)
 			return false
 		}
+		event.Type = effectiveOpenAISSEEventType([]byte(payload), event.Type)
 		observer.ObserveOpenAI([]byte(payload), event.Type)
 		if c.Request != nil {
 			regionalMeterObserveUsage(c.Request.Context(), []byte(payload), event.Type)
@@ -1133,7 +1135,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			return true
 		}
 
-		if retryStage != nil && openAIStreamDataStartsClientOutput(payload, strings.TrimSpace(event.Type)) && !isTerminalEvent {
+		if retryStage != nil && (openAIStreamDataStartsClientOutput(payload, strings.TrimSpace(event.Type)) || openAIStreamDataIsOpaquePreamble(payload, strings.TrimSpace(event.Type))) && !isTerminalEvent {
 			observeOpenAIHTTPProgress(c.Request.Context())
 		}
 		chunks := apicompat.ResponsesEventToChatChunks(&event, state)
@@ -1157,19 +1159,19 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					)
 					continue
 				}
-				if retryStage != nil && !isTerminalEvent {
-					if _, err := retryStage.WriteString(sse); err != nil {
-						streamFailoverErr = s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, "OpenAI chat retry staging failed")
-						_ = resp.Body.Close()
-						return true
-					}
-					continue
-				}
 				// A role-only chunk is protocol metadata, regardless of request size.
 				// Keep it private until useful output or a successful terminal so a
 				// subsequent capacity rejection can still enter bounded failover.
 				if !clientOutputStarted && ((!isTerminalEvent && !openAIChatChunkHasOutput(chunk)) || !refusalDetector.ShouldReleaseClientOutput()) {
-					pendingSSE = append(pendingSSE, sse)
+					if retryStage != nil && !retryStage.closed {
+						if _, err := retryStage.WriteString(sse); err != nil {
+							streamFailoverErr = s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, "OpenAI chat pre-output staging failed")
+							_ = resp.Body.Close()
+							return true
+						}
+					} else {
+						pendingSSE = append(pendingSSE, sse)
+					}
 					continue
 				}
 				if !clientOutputStarted {

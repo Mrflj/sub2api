@@ -9,12 +9,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// A configured retry must not replay reasoning or tool calls already delivered
-// to a client. Keep the attempt private until its terminal event instead.
-func openAIStreamBuffersConfiguredRetry(account *Account) bool {
+// Configured retries apply only while the attempt has not delivered model
+// output. They may enlarge the private preamble limits, but must never hold a
+// healthy stream until its terminal event.
+func openAIStreamConfiguredRetryEnabled(account *Account) bool {
 	return account != nil && account.Platform == PlatformOpenAI &&
 		account.IsPoolMode() && account.GetPoolModeRetryCount() > 0 &&
 		account.IsPoolModeRetryableStatus(http.StatusBadGateway)
+}
+
+// Keep draining detached upstream streams for usage, but never write queued
+// output or schedule a replay after the downstream request has been canceled.
+func openAIStreamClientCanceled(c *gin.Context) bool {
+	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 
 func (s *OpenAIGatewayService) openAIStreamRetryLimits() (int, int64) {
@@ -32,7 +39,7 @@ func (s *OpenAIGatewayService) openAIStreamRetryLimits() (int, int64) {
 }
 
 func (s *OpenAIGatewayService) newOpenAIStreamOutputStage(account *Account) *openAIFirstOutputStage {
-	if !openAIStreamBuffersConfiguredRetry(account) {
+	if !openAIStreamConfiguredRetryEnabled(account) {
 		return newDefaultOpenAIFirstOutputStage()
 	}
 	_, limit := s.openAIStreamRetryLimits()
@@ -40,7 +47,7 @@ func (s *OpenAIGatewayService) newOpenAIStreamOutputStage(account *Account) *ope
 }
 
 func (s *OpenAIGatewayService) openAIRetryLineLimitError(c *gin.Context, account *Account, requestID string, err error, disconnected, outputStarted bool) *UpstreamFailoverError {
-	if !errors.Is(err, bufio.ErrTooLong) || !openAIStreamBuffersConfiguredRetry(account) || disconnected || c == nil || c.Request == nil || c.Request.Context().Err() != nil || openAIStreamClientOutputStarted(c, outputStarted) {
+	if !errors.Is(err, bufio.ErrTooLong) || !openAIStreamConfiguredRetryEnabled(account) || disconnected || c == nil || c.Request == nil || c.Request.Context().Err() != nil || openAIStreamClientOutputStarted(c, outputStarted) {
 		return nil
 	}
 	return s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, "OpenAI SSE line exceeds configured maximum before output")

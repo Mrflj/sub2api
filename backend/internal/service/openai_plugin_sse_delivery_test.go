@@ -353,7 +353,7 @@ func TestPluginSSEMetadataEligibilityRequiresOneCompletePayload(t *testing.T) {
 	}
 }
 
-func TestPluginSSEPoolRetriesRemainPrivate(t *testing.T) {
+func TestPluginSSEPoolStreamsOutputWithoutGrantingEarlyMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"native", "passthrough"} {
 		for _, output := range []string{"reasoning", "tool", "text"} {
@@ -405,19 +405,17 @@ func TestPluginSSEPoolRetriesRemainPrivate(t *testing.T) {
 						collector.Finish(http.StatusOK, false)
 						var snapshot requesttiming.Snapshot
 						collector.WhenFinished(func(s requesttiming.Snapshot) { snapshot = s })
+						require.Equal(t, 200*time.Millisecond, w.first, "pool accounts release real output without granting plugin metadata delivery at 100ms")
+						require.Equal(t, float64(200), snapshot.Events["first_sse_event_flush"])
+						require.Contains(t, w.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
 						if scenario == "success" {
 							require.NoError(t, err)
-							require.Equal(t, 300*time.Millisecond, w.first, "configured retries must wait for the successful terminal")
-							require.Equal(t, float64(300), snapshot.Events["first_sse_event_flush"])
 							require.Contains(t, w.Body.String(), "response.completed")
 						} else {
 							var failover *UpstreamFailoverError
-							require.ErrorAs(t, err, &failover)
-							require.Equal(t, http.StatusBadGateway, failover.StatusCode)
-							require.True(t, failover.RetryableOnSameAccount)
-							require.False(t, c.Writer.Written())
-							require.Empty(t, w.Body.String(), "failed metadata, reasoning and tool calls must remain private")
-							require.NotContains(t, snapshot.Events, "first_sse_event_flush")
+							require.Error(t, err)
+							require.NotErrorAs(t, err, &failover, "delivered output cannot be replayed")
+							require.True(t, c.Writer.Written())
 						}
 					})
 				})

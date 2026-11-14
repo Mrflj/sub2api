@@ -158,7 +158,7 @@ data: ` + payload + `
 					require.Error(t, err)
 					var failoverErr *UpstreamFailoverError
 					wantKind := "failover"
-					if outputStarted && retryStatus != http.StatusBadGateway {
+					if outputStarted {
 						require.NotErrorAs(t, err, &failoverErr, "committed model output cannot be replayed")
 						require.Contains(t, rec.Body.String(), "partial")
 						wantKind = "stream_failed"
@@ -177,7 +177,7 @@ data: ` + payload + `
 					require.Equal(t, wantKind, upstream[0].Kind)
 					require.Equal(t, http.StatusBadGateway, upstream[0].UpstreamStatusCode)
 					require.Equal(t, account.ID, upstream[0].AccountID)
-					require.False(t, logSink.ContainsMessage("openai.same_account_retry_suppressed"), "configured 502 attempts stay private until their terminal event")
+					require.Equal(t, outputStarted && retryStatus == http.StatusBadGateway, logSink.ContainsMessage("openai.same_account_retry_suppressed"))
 				})
 			}
 		}
@@ -254,8 +254,8 @@ func TestOpenAIStreamErrorFrameDoesNotStartClientOutput(t *testing.T) {
 		{`{"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}`, "error", false},
 		{`{"type":"error","error":{"code":"slow_down","message":"slow down"}}`, "error", false},
 		{`{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"limited"}}`, "error", false},
-		// 不可重试类错误帧维持原样转发（不进 failover），保留上游错误细节。
-		{`{"type":"error","error":{"type":"invalid_request_error","code":"content_policy_violation","message":"blocked"}}`, "error", true},
+		// Fatal errors are delivered by the failure branch, never classified as model output.
+		{`{"type":"error","error":{"type":"invalid_request_error","code":"content_policy_violation","message":"blocked"}}`, "error", false},
 		{`{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`, "response.failed", false},
 		{`{"type":"response.created","response":{"id":"resp_1"}}`, "response.created", false},
 		{`{"type":"response.queued","response":{"id":"resp_1","status":"queued"}}`, "response.queued", false},
@@ -424,10 +424,6 @@ func TestOpenAIStreamReplayBoundaryPreservesContentAndToolCompletion(t *testing.
 		`{"type":"response.output_item.done","item":{"type":"message","content":[{"type":"refusal","refusal":null}]}}`,
 		`{"type":"response.output_item.done","item":{"type":"unknown"}}`,
 		`{"type":"response.output_item.done","item":null}`,
-		`{"type":"response.output_text.delta","delta":null}`,
-		`{"type":"response.output_text.delta"}`,
-		`{"type":"response.output_text.delta","delta":{}}`,
-		`{"type":"response.new_kind.delta","delta":""}`,
 	} {
 		eventType := gjson.Get(payload, "type").String()
 		require.True(t, openAIStreamDataStartsClientOutput(payload, eventType), payload)

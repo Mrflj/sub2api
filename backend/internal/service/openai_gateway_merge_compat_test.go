@@ -111,8 +111,8 @@ func TestGroupPrompt400RecoveryPreservesMappedInstructions(t *testing.T) {
 	}
 }
 
-// Configured 502 buffering must discard partial content on a peer reset and
-// retain the upstream no-replay transport classification at both reader loops.
+// A peer reset after delivered output must retain that output and the upstream
+// no-replay transport classification at both reader loops.
 func TestOpenAIConfiguredStreamRetryHTTP2ResetDoesNotReplay(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, keepalive := range []int{0, 1} {
@@ -133,7 +133,7 @@ func TestOpenAIConfiguredStreamRetryHTTP2ResetDoesNotReplay(t *testing.T) {
 				code, _, ok := OpenAIUpstreamStreamReadErrorDetails(err)
 				require.True(t, ok)
 				require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
-				require.NotContains(t, rec.Body.String(), "private answer")
+				require.Contains(t, rec.Body.String(), "private answer")
 				require.NotContains(t, rec.Body.String(), "message_stop")
 				require.NotContains(t, rec.Body.String(), "response.completed")
 				ops, marked := GetOpsStreamError(c)

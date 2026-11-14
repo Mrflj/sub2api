@@ -16,10 +16,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIMergedRetryHeartbeatsKeepAttemptsPrivate(t *testing.T) {
+func TestOpenAIMergedRetryHeartbeatsKeepPreamblesPrivate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"native", "passthrough"} {
-		for _, output := range []string{"reasoning", "tool", "text", "opaque_reasoning", "opaque_compaction", "open_event"} {
+		for _, output := range []string{"opaque_reasoning", "opaque_compaction", "open_event"} {
 			t.Run(path+"/"+output, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					start := time.Now()
@@ -34,7 +34,7 @@ func TestOpenAIMergedRetryHeartbeatsKeepAttemptsPrivate(t *testing.T) {
 					}
 					if output == "open_event" {
 						preamble = "event: response.output_text.delta\n" +
-							"data: {\"type\":\"response.output_text.delta\",\"delta\":\"private_open_event\"}\n"
+							"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n"
 					}
 					reader, writer := io.Pipe()
 					done := make(chan struct{})
@@ -104,7 +104,7 @@ func TestOpenAIMergedRetryHeartbeatDisconnectDrainsUsage(t *testing.T) {
 					go func() {
 						defer close(done)
 						defer writer.Close()
-						if _, err := io.WriteString(writer, configuredRetryOutput("reasoning")); err != nil {
+						if _, err := io.WriteString(writer, configuredRetryOpaquePreamble()); err != nil {
 							return
 						}
 						time.Sleep(2500 * time.Millisecond)

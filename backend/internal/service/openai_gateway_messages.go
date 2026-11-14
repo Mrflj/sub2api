@@ -1067,12 +1067,12 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	var usage OpenAIUsage
 	responseID := ""
 	var firstTokenMs *int
-	firstChunk := true
-	clientDisconnected := false
+	clientDisconnected := openAIStreamClientCanceled(c)
+	lastDownstreamWriteAt := time.Now()
 	clientOutputStarted := false
 	firstClientOutputEvent := ""
 	firstClientOutputItemType := ""
-	bufferRetryAttempt := openAIStreamBuffersConfiguredRetry(account)
+	configuredStreamRetry := openAIStreamConfiguredRetryEnabled(account)
 	preamble := s.newOpenAIStreamOutputStage(account)
 	defer func() {
 		if err := preamble.Close(); err != nil {
@@ -1145,12 +1145,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 	// processDataLine handles a single "data: ..." SSE line from upstream.
 	processDataLine := func(payload string) bool {
+		clientDisconnected = clientDisconnected || openAIStreamClientCanceled(c)
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
-		if firstChunk {
-			firstChunk = false
-			ms := int(time.Since(startTime).Milliseconds())
-			firstTokenMs = &ms
-		}
 		if countSearch {
 			searchCount += countGrokNativeSearchCallsInSSEDataDedup([]byte(payload), streamSearchSeen)
 		}
@@ -1163,11 +1159,12 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			)
 			return false
 		}
+		event.Type = effectiveOpenAISSEEventType([]byte(payload), event.Type)
 		observer.ObserveOpenAI([]byte(payload), event.Type)
 		s.parseSSEUsageBytesWithType([]byte(payload), event.Type, &usage)
 
 		eventType := strings.TrimSpace(event.Type)
-		if bufferRetryAttempt && openAIStreamDataStartsClientOutput(payload, eventType) && !openAIStreamEventTypeIsTerminal(eventType) {
+		if configuredStreamRetry && (openAIStreamDataStartsClientOutput(payload, eventType) || openAIStreamDataIsOpaquePreamble(payload, eventType)) && !openAIStreamEventTypeIsTerminal(eventType) {
 			observeOpenAIHTTPProgress(c.Request.Context())
 		}
 		isBareErrorEvent := eventType == "error"
@@ -1259,8 +1256,14 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 		// Convert to Anthropic events
 		events := apicompat.ResponsesEventToAnthropicEvents(&event, state)
+		startsOutput := openAIStreamDataStartsClientOutput(payload, eventType)
+		if firstTokenMs == nil && len(events) > 0 && startsOutput &&
+			(!isTerminalEvent || openAIStreamDataStartsVisibleOutput(payload, eventType)) {
+			ms := int(time.Since(startTime).Milliseconds())
+			firstTokenMs = &ms
+		}
 		stagePreamble := !clientOutputStarted && !isTerminalEvent &&
-			(bufferRetryAttempt || !openAIStreamDataStartsClientOutput(payload, eventType))
+			!startsOutput
 		if !clientDisconnected {
 			for _, evt := range events {
 				sse, err := apicompat.ResponsesAnthropicEventToSSE(evt)
@@ -1301,6 +1304,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 		}
 		if len(events) > 0 && !clientDisconnected && clientOutputStarted {
 			c.Writer.Flush()
+			lastDownstreamWriteAt = time.Now()
 		}
 		return isTerminalEvent
 	}
@@ -1451,7 +1455,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	if keepaliveTicker != nil {
 		keepaliveCh = keepaliveTicker.C
 	}
-	lastDataAt := time.Now()
 	var parser openAICompatSSEFrameParser
 
 	for {
@@ -1481,7 +1484,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				}
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
-			lastDataAt = time.Now()
 			line := ev.line
 			if isOpenAICompatDoneSentinelLine(line) {
 				return missingTerminalErr()
@@ -1513,7 +1515,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			if clientDisconnected {
 				continue
 			}
-			if !bufferRetryAttempt && time.Since(lastDataAt) < keepaliveInterval {
+			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
 				continue
 			}
 			// Send Anthropic-format ping event
@@ -1529,6 +1531,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				continue
 			}
 			c.Writer.Flush()
+			lastDownstreamWriteAt = time.Now()
 		}
 	}
 }
