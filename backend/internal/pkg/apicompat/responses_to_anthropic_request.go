@@ -44,6 +44,26 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 		// Anthropic requires max_tokens; default to a sensible value.
 		out.MaxTokens = 8192
 	}
+	if req.TopLogprobs != nil {
+		return nil, unsupportedRequestConversion("top_logprobs has no equivalent in Messages")
+	}
+	if req.Text != nil && req.Text.Verbosity != "" && req.Text.Verbosity != "medium" {
+		return nil, unsupportedRequestConversion("text.verbosity %q has no equivalent in Messages", req.Text.Verbosity)
+	}
+	for _, include := range req.Include {
+		if include == "message.output_text.logprobs" {
+			return nil, unsupportedRequestConversion("logprobs has no equivalent in Messages")
+		}
+	}
+	if req.Text != nil && len(normalizedRawJSON(req.Text.Format)) > 0 {
+		format, err := responsesTextFormatToAnthropicOutputFormat(req.Text.Format)
+		if err != nil {
+			return nil, err
+		}
+		if len(format) > 0 {
+			out.OutputConfig = &AnthropicOutputConfig{Format: format}
+		}
+	}
 
 	// Convert tools
 	if len(req.Tools) > 0 {
@@ -131,14 +151,20 @@ func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, erro
 			return nil, fmt.Errorf("%s does not support reasoning effort %q; use low, medium, high, xhigh or max", req.Model, effort)
 		}
 		out.Thinking = &AnthropicThinking{Type: "adaptive"}
-		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
+		if out.OutputConfig == nil {
+			out.OutputConfig = &AnthropicOutputConfig{}
+		}
+		out.OutputConfig.Effort = effort
 		return out, nil
 	}
 
 	// reasoning.effort → output_config.effort + thinking
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		effort := mapResponsesEffortToAnthropic(req.Reasoning.Effort)
-		out.OutputConfig = &AnthropicOutputConfig{Effort: effort}
+		if out.OutputConfig == nil {
+			out.OutputConfig = &AnthropicOutputConfig{}
+		}
+		out.OutputConfig.Effort = effort
 		// Enable thinking for non-low efforts
 		if effort != "low" {
 			out.Thinking = &AnthropicThinking{
@@ -236,7 +262,10 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 
 		case item.Type == "function_call_output":
 			// function_call_output → user message with tool_result block
-			contentJSON := responsesFunctionOutputToAnthropicContent(item)
+			contentJSON, err := responsesFunctionOutputToAnthropicContent(item)
+			if err != nil {
+				return nil, nil, err
+			}
 			block := AnthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: fromResponsesCallIDToAnthropic(item.CallID),
@@ -340,14 +369,14 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	return system, messages, nil
 }
 
-func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {
+func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) (json.RawMessage, error) {
 	if len(item.outputRaw) == 0 {
 		output := item.Output
 		if output == "" {
 			output = "(empty)"
 		}
 		content, _ := json.Marshal(output)
-		return content
+		return content, nil
 	}
 
 	var parts []ResponsesContentPart
@@ -359,24 +388,26 @@ func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.Raw
 				if part.Text != "" {
 					blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: part.Text})
 				}
-			case "input_image":
-				if source := dataURIToAnthropicImageSource(part.ImageURL); source != nil {
-					blocks = append(blocks, AnthropicContentBlock{Type: "image", Source: source})
+			case "input_image", "input_file", "video_url", "input_video", "video", "input_audio", "audio":
+				block, err := responsesMediaToAnthropicBlock(part)
+				if err != nil {
+					return nil, err
 				}
+				blocks = append(blocks, block)
 			}
 		}
 		if len(blocks) > 0 {
 			content, _ := json.Marshal(blocks)
-			return content
+			return content, nil
 		}
 		if len(parts) == 0 {
 			content, _ := json.Marshal("(empty)")
-			return content
+			return content, nil
 		}
 	}
 
 	content, _ := json.Marshal(item.Output)
-	return content
+	return content, nil
 }
 
 // normalizeAnthropicToolPairing rebuilds the message sequence so it satisfies
@@ -575,22 +606,12 @@ func convertResponsesUserToAnthropicContent(raw json.RawMessage) (json.RawMessag
 					Text: p.Text,
 				})
 			}
-		case "input_image":
-			src := dataURIToAnthropicImageSource(p.ImageURL)
-			if src != nil {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type:   "image",
-					Source: src,
-				})
+		case "input_image", "input_file", "video_url", "input_video", "video", "input_audio", "audio":
+			block, err := responsesMediaToAnthropicBlock(p)
+			if err != nil {
+				return nil, err
 			}
-		case "input_file":
-			src := dataURIToAnthropicFileSource(p.FileData)
-			if src != nil {
-				blocks = append(blocks, AnthropicContentBlock{
-					Type:   "document",
-					Source: src,
-				})
-			}
+			blocks = append(blocks, block)
 		}
 	}
 
@@ -679,7 +700,7 @@ func dataURIToAnthropicImageSource(dataURI string) *AnthropicImageSource {
 }
 
 // dataURIToAnthropicFileSource parses a data URI into a document source.
-// file_id-only parts are not convertible here and stay dropped.
+// Cross-provider file_id references require an explicit conversion error.
 func dataURIToAnthropicFileSource(fileData string) *AnthropicImageSource {
 	return dataURIToAnthropicImageSource(fileData)
 }

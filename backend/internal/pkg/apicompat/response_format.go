@@ -2,6 +2,37 @@ package apicompat
 
 import "encoding/json"
 
+func anthropicOutputFormatToResponsesTextFormat(raw json.RawMessage) (json.RawMessage, error) {
+	obj, ok := rawJSONObject(raw)
+	if !ok || rawString(obj["type"]) != "json_schema" || len(normalizedRawJSON(obj["schema"])) == 0 {
+		return nil, unsupportedRequestConversion("output_config.format requires a json_schema with schema for OpenAI conversion")
+	}
+	// Responses requires a schema name; Anthropic does not provide one. The
+	// schema itself and any caller-provided additional options stay intact.
+	if rawString(obj["name"]) == "" {
+		obj["name"] = rawJSONString("response")
+	}
+	return json.Marshal(obj)
+}
+
+func responsesTextFormatToAnthropicOutputFormat(raw json.RawMessage) (json.RawMessage, error) {
+	obj, ok := rawJSONObject(raw)
+	if !ok {
+		return nil, unsupportedRequestConversion("text.format must be an object for Messages conversion")
+	}
+	switch rawString(obj["type"]) {
+	case "text", "":
+		return nil, nil
+	case "json_schema":
+		if len(normalizedRawJSON(obj["schema"])) == 0 {
+			return nil, unsupportedRequestConversion("text.format.json_schema requires a schema for Messages conversion")
+		}
+		return json.Marshal(map[string]json.RawMessage{"type": rawJSONString("json_schema"), "schema": obj["schema"]})
+	default:
+		return nil, unsupportedRequestConversion("text.format type %q cannot be converted to Messages; provide an explicit json_schema", rawString(obj["type"]))
+	}
+}
+
 func chatResponseFormatToResponsesTextFormat(raw json.RawMessage) json.RawMessage {
 	raw = normalizedRawJSON(raw)
 	if len(raw) == 0 {

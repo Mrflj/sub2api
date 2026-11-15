@@ -281,16 +281,19 @@ type ccStreamScanState struct {
 	FirstTokenMs *int
 	// SawDone 表示上游发出了 [DONE] 哨兵。
 	SawDone bool
-	// Err 为 scanner 读错误（客户端 context 取消不属于此类，会原样带出）。
-	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
-	// 把上游截断伪装成正常收尾。
+	// SawFinish requires a business terminal on every observed choice. [DONE]
+	// alone is only transport framing and cannot complete a partial tool call.
+	SawFinish bool
+	// Err records read failures, explicit upstream errors, or missing/invalid
+	// business terminals. Cancellation is preserved without enabling replay.
+	// Callers must skip successful finalization whenever it is non-nil.
 	Err error
 }
 
 // scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
 // 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
-// emit 回调做各自的协议转换与写出。读错误按既有约定过滤 context 取消类噪声后
-// 记入 Warn 日志。
+// emit 回调做各自的协议转换与写出。错误 envelope 不进入转换；正常流必须包含
+// 业务 finish_reason。读错误按既有约定过滤 context 取消类噪声后记入 Warn 日志。
 func (s *OpenAIGatewayService) scanCCStream(
 	c *gin.Context,
 	resp *http.Response,
@@ -301,10 +304,20 @@ func (s *OpenAIGatewayService) scanCCStream(
 	emit func(*apicompat.ChatCompletionsChunk),
 ) ccStreamScanState {
 	var st ccStreamScanState
+	choices, finished := map[int]bool{}, map[int]bool{}
+	eventHeader := ""
 
 	scanner := s.newUpstreamSSEScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			eventHeader = ""
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			eventHeader = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
 		payload, ok := extractOpenAISSEDataLine(line)
 		if !ok {
 			continue
@@ -317,16 +330,24 @@ func (s *OpenAIGatewayService) scanCCStream(
 			st.SawDone = true
 			break
 		}
+		// Failed turns can still carry billed usage. Preserve counters without
+		// allowing the envelope to advance model-output or conversion state.
+		if u := extractCCStreamUsage(payload); u != nil {
+			mergeOpenAIProtectionUsageEvidence(st.Usage, u)
+			st.Usage = *u
+		}
+		// Valid JSON error envelopes also decode into an empty CC chunk. Detect
+		// them before normalization/conversion so failure is never model output.
+		eventType := effectiveOpenAISSEEventType([]byte(payload), eventHeader)
+		if eventType == "error" || eventType == "response.error" || eventType == "response.failed" {
+			st.Err = newCCUpstreamStreamError([]byte(payload), eventType)
+			return st
+		}
 		// 观察上游 CC chunk 回显的 model / service_tier（计费以回显为准）。
 		// CC chunk 无 type 字段，按 untyped payload 观察（上游约束：只有终止
 		// 事件与无类型 body 报告实际处理档位）。
 		if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
 			observer.ObserveOpenAI([]byte(payload), "")
-		}
-
-		if u := extractCCStreamUsage(payload); u != nil {
-			mergeOpenAIProtectionUsageEvidence(st.Usage, u)
-			st.Usage = *u
 		}
 
 		normalized, err := normalizeMistralChatResponse(account, []byte(payload), true)
@@ -346,6 +367,19 @@ func (s *OpenAIGatewayService) scanCCStream(
 			)
 			continue
 		}
+		for _, choice := range chunk.Choices {
+			choices[choice.Index] = true
+			if choice.FinishReason == nil || *choice.FinishReason == "" {
+				continue
+			}
+			switch *choice.FinishReason {
+			case "stop", "length", "tool_calls", "function_call", "content_filter":
+				finished[choice.Index] = true
+			default:
+				st.Err = ErrOpenAIUpstreamStreamTruncated
+				return st
+			}
+		}
 		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {
 			ms := int(time.Since(startTime).Milliseconds())
 			st.FirstTokenMs = &ms
@@ -364,6 +398,13 @@ func (s *OpenAIGatewayService) scanCCStream(
 		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, err); handled {
 			st.Err = resetErr
 		}
+	}
+	if st.Err == nil && c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		st.Err = c.Request.Context().Err()
+	}
+	st.SawFinish = len(choices) > 0 && len(finished) == len(choices)
+	if st.Err == nil && !st.SawFinish {
+		st.Err = ErrOpenAIUpstreamStreamTruncated
 	}
 	return st
 }

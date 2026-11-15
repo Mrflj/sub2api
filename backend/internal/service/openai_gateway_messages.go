@@ -195,6 +195,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		DeferReasoningEffortValidation: true,
 	})
 	if err != nil {
+		if apicompat.IsUnsupportedRequestConversion(err) {
+			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		}
 		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
 	}
 

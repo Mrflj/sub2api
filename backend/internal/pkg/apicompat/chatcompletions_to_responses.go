@@ -24,6 +24,12 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 // ChatCompletionsToResponsesWithMinOutputTokens converts a Chat Completions
 // request using the supplied max_output_tokens floor.
 func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, minOutputTokens int) (*ResponsesRequest, error) {
+	if err := validateChatRequestMedia(req); err != nil {
+		return nil, err
+	}
+	if req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Seed != nil || len(normalizedRawJSON(req.LogitBias)) > 0 || (req.N != nil && *req.N != 1) || len(normalizedRawJSON(req.Stop)) > 0 {
+		return nil, unsupportedRequestConversion("frequency_penalty, presence_penalty, seed, logit_bias, n other than 1 and stop have no equivalent in Responses; use a native Chat Completions endpoint to retain these generation controls")
+	}
 	// Use one effective effort without changing the caller's field provenance.
 	// Legacy Responses ingress still distinguishes native reasoning from the
 	// flat Chat alias when deciding which top-level fields to replace.
@@ -50,6 +56,10 @@ func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, 
 		ServiceTier:        req.ServiceTier,
 		PromptCacheOptions: req.PromptCacheOptions,
 		ParallelToolCalls:  req.ParallelToolCalls,
+		TopLogprobs:        req.TopLogprobs,
+	}
+	if req.Logprobs != nil && *req.Logprobs {
+		out.Include = append(out.Include, "message.output_text.logprobs")
 	}
 
 	// Reasoning models (gpt-5.x) do not accept sampling parameters.
@@ -91,6 +101,12 @@ func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, 
 			out.Text = &ResponsesText{}
 		}
 		out.Text.Format = format
+	}
+	if req.Verbosity != "" {
+		if out.Text == nil {
+			out.Text = &ResponsesText{}
+		}
+		out.Text.Verbosity = req.Verbosity
 	}
 
 	// tools[] and legacy functions[] → ResponsesTool[]
@@ -364,18 +380,7 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
 // chatToolToResponses converts a tool result message (role=tool) into a
 // function_call_output item.
 func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
-	output, err := parseChatContent(m.Content)
-	if err != nil {
-		return nil, err
-	}
-	if output == "" {
-		output = "(empty)"
-	}
-	return []ResponsesInputItem{{
-		Type:   "function_call_output",
-		CallID: m.ToolCallID,
-		Output: output,
-	}}, nil
+	return chatResultToResponses(m, m.ToolCallID)
 }
 
 // chatFunctionToResponses converts a legacy function result message
@@ -383,22 +388,47 @@ func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 // assigned to the matching legacy call (see legacyFunctionCallIDs); without a
 // matching call the Name field is used as call_id.
 func chatFunctionToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
-	output, err := parseChatContent(m.Content)
-	if err != nil {
-		return nil, err
-	}
-	if output == "" {
-		output = "(empty)"
-	}
 	callID := m.ToolCallID
 	if callID == "" {
 		callID = m.Name
 	}
-	return []ResponsesInputItem{{
-		Type:   "function_call_output",
-		CallID: callID,
-		Output: output,
-	}}, nil
+	return chatResultToResponses(m, callID)
+}
+
+func chatResultToResponses(m ChatMessage, callID string) ([]ResponsesInputItem, error) {
+	parsed, err := parseChatMessageContent(m.Content)
+	if err != nil {
+		return nil, err
+	}
+	output := ""
+	var media []ResponsesContentPart
+	if parsed.Text != nil {
+		output = *parsed.Text
+	} else {
+		output = flattenChatContentParts(parsed.Parts)
+		parts, err := convertChatContentPartsToResponses(parsed.Parts)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range parts {
+			if part.Type == "input_image" || part.Type == "input_file" {
+				media = append(media, part)
+			}
+		}
+	}
+	if output == "" {
+		output = "(empty)"
+	}
+	items := []ResponsesInputItem{{Type: "function_call_output", CallID: callID, Output: output}}
+	if len(media) > 0 {
+		parts := append([]ResponsesContentPart{{Type: "input_text", Text: fmt.Sprintf(toolOutputMediaAttribution, callID)}}, media...)
+		content, err := json.Marshal(parts)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, ResponsesInputItem{Type: "message", Role: "user", Content: content})
+	}
+	return items, nil
 }
 
 // parseChatContent returns the string value of a ChatMessage Content field.
@@ -437,7 +467,10 @@ func marshalChatInputContent(content chatMessageContent) (json.RawMessage, error
 	if content.Text != nil {
 		return json.Marshal(*content.Text)
 	}
-	parts := convertChatContentPartsToResponses(content.Parts)
+	parts, err := convertChatContentPartsToResponses(content.Parts)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 {
 		// A nil slice marshals to JSON null, which the upstream Responses API
 		// rejects ("expected an array of objects or string, but got null").
@@ -447,7 +480,7 @@ func marshalChatInputContent(content chatMessageContent) (json.RawMessage, error
 	return json.Marshal(parts)
 }
 
-func convertChatContentPartsToResponses(parts []ChatContentPart) []ResponsesContentPart {
+func convertChatContentPartsToResponses(parts []ChatContentPart) ([]ResponsesContentPart, error) {
 	var responseParts []ResponsesContentPart
 	for _, p := range parts {
 		switch p.Type {
@@ -465,6 +498,7 @@ func convertChatContentPartsToResponses(parts []ChatContentPart) []ResponsesCont
 					PromptCacheBreakpoint: p.PromptCacheBreakpoint,
 					Type:                  "input_image",
 					ImageURL:              p.ImageURL.URL,
+					Detail:                p.ImageURL.Detail,
 				})
 			}
 		case "file":
@@ -477,9 +511,13 @@ func convertChatContentPartsToResponses(parts []ChatContentPart) []ResponsesCont
 					FileID:                p.File.FileID,
 				})
 			}
+		case "video_url", "input_video", "video":
+			return nil, unsupportedRequestConversion("Chat content type %q cannot be converted to Responses; this target protocol has no equivalent media input", p.Type)
+		case "input_audio", "audio":
+			return nil, unsupportedRequestConversion("Chat audio content type %q is not implemented by this conversion; use a native audio-capable endpoint", p.Type)
 		}
 	}
-	return responseParts
+	return responseParts, nil
 }
 
 func isEmptyBase64DataURI(raw string) bool {

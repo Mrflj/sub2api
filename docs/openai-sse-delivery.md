@@ -61,6 +61,42 @@ CI 使用受控时钟和 mock 验证 created 100ms、推理 300ms、正文 800ms
 
 将宿主开关改回 `false` 并按既有发布流程重启，可恢复插件原暂存策略，观测继续保留。本功能沿用 timing JSON，无数据库迁移；完整二进制回滚无需恢复历史 timing 数据。在途 SSE 按现有发布方式排空。
 
+## Messages 工具执行语义与流转换
+
+`/v1/messages` 转发到 Responses 或 Chat 时，`tool_choice.disable_parallel_tool_use: true` 对应 `parallel_tool_calls: false`；未提供该字段或明确为 `false` 时，保留原来的并行默认值。`auto`、`any` 和指定工具的选择方式不改变，原生 Anthropic 转发也不为这些兼容规则重建请求。
+
+Messages 的 `tool_result.is_error` 在 OpenAI function result 中没有原生对应字段。因此只有失败结果才编码为以下结果数据，成功文本保持原样，普通文字中的 `error` 不会被识别成执行失败：
+
+```json
+{"is_error":true,"content":"原始工具结果文本"}
+```
+
+仅包含这两个字段、布尔值为真且 `content` 为字符串的已有相同封装不会再次包装；其他 JSON 仍作为原始结果文本保留。图片沿用现有分离传递方式，作为后续 user image 交给模型，调用与结果的关联 ID 不变。该封装表达的是工具返回数据，不代表网关执行了工具，也不会触发工具自动重放。
+
+Responses 的并行参数按 `output_index` 隔离：首个工具仍即时流式，后续工具等待前一个真正完成后再打开自己的 Messages block。参数 done、item done 或终端快照结束对应调用；完整快照只补确定缺失的参数后缀。Read 的空 `pages` 处理继续保留。真正的 `custom_tool_call` 自由文本按照已有 custom 降级 schema 编码为 `{"input":"原始自由文本"}`；流式片段在字符串内部逐段 JSON 转义，done 和快照先在原始文本层补尾再完成对象。已经是 function 型的 `{"input":...}` 参数不重复包装。
+
+Chat 没有逐个工具的 done 事件，因此首个工具持续流式，其他调用在 `finish_reason` 后依次输出。工具后的正文若与尚未完成的工具交错，会等该工具完成后再输出；常规正文首字不等待终态。随后到达的 usage 仍归入唯一终端事件。已完成调用的迟到事件不会关闭新调用，`message_stop` 后不再输出内容。
+
+Messages/Responses 的 Chat 上游回退共用业务终态校验：每个实际出现的 choice 必须具有支持的非空 `finish_reason`。已有合法终态和后续 usage 时允许直接 EOF，兼容未发 `[DONE]` 的服务；只有 `[DONE]`、只有 role/空正文、或工具参数已经是合法 JSON 但没有终态，都不能合成成功结束。`error`、`response.failed`、顶层 error envelope 和仅由 SSE `event: error` 标识的失败在转换前识别，错误自带的 usage 可保留，但不算模型内容。
+
+角色和空正文等前导事件使用有界私有暂存，首段实际输出立即释放；未输出前的可重试失败交给现有账号/池重试规则。已经输出后，失败只回写当前端点的错误事件，不重放、不发成功终止事件，也不将已有部分工具参数发布为正常完成。取消后不释放暂存内容。明确的 HTTP/2 reset 继续使用已有独立分类，不因错误文本伪造 transport evidence。
+
+回归测试既检查 delta 对应的 block 曾经存在，也检查发送时仍然打开，并核对每个调用的完整参数、ID、失败标志、图片、usage 和单次终止。测试使用本地数据及模拟上游，不调用真实模型或 MCP 服务。
+
+## 请求媒体与生成参数的跨协议边界
+
+原始同协议转发继续保留请求体及供应商扩展字段；以下转换规则只用于真正进入 apicompat 的跨协议请求，不据此替换模型或宣称模型具有某种媒体能力。模型、账号或上游本身不支持某种媒体时，仍由其原生端点验证。
+
+- Messages 的 base64 PDF document 转为 Responses `input_file.file_data` 或 Chat `file.file_data`；PDF 数据、文件名、URL 图片及工具结果中的 PDF/图片会保留。Messages URL document 可转为 Responses `file_url`，Chat 无对应文件 URL 字段时明确返回 400，不自动下载文件。
+- Responses `input_file` 的 `file_data` / `file_id` 转为 Chat `file`；向 Messages 转换只接受 PDF data URI 或 HTTP(S) URL。不同供应商的文件 ID 不可直接复用，无法转换时返回 400，不能把文档所在消息静默丢掉。
+- 图片 URL 在 Messages/Responses/Chat 间保留；Chat 与 Responses 之间同时保留 `detail`。Responses 的 `original` 在 Chat 目标中采用其可表达的 `high` 提示，图像 URL/数据不变；原生 Responses 的媒体提取仍保留 `original`。
+- Chat 的供应商 `video_url` 扩展在原始 Chat 转发中保持原样。进入 Responses 或 Messages 转换时明确返回 400；不生成没有协议依据的 `input_video`，不把视频丢弃后只发送旁边的文本。音频跨协议转换不在此次实现范围，桥接遇到音频也明确拒绝，原始音频端点转发不变。
+- 工具媒体从结果中提取后仍携带原调用 ID 的归属提示。图片和 PDF 会作为后续 user 内容交给模型，而不是让 base64 数据在转换中消失。
+
+生成参数方面，Messages `stop_sequences` 直转 Chat 时保留为 `stop`，JSON Schema 输出约束在三协议间按各自格式映射，Chat/Responses 间保留 `verbosity`、`logprobs` 与 `top_logprobs`（含零值）。Responses 没有 `stop` / `top_k` 对应字段，Chat 的 penalty、seed、logit_bias、多个候选及 stop 也不能由现有 Responses 桥接表达；这些显式参数会得到 400，而非被解码后静默忽略。Messages 没有 logprobs 或低/高 verbosity 对应控制，同样明确拒绝。原生同协议请求保留这些参数，已有按实际模型限制 sampling 的规则不变。
+
+永久回归覆盖实际转发入口的 400、未发出上游请求、文档进入实际模型请求体、原生 Chat 视频/供应商参数直通、媒体内工具关联，以及 JSON Schema / 参数零值。全部使用本地模拟上游，不验证真实视频模型可用性，也不调用付费 API。
+
 ## 实现来源
 
 起点为用户提供的 `SUB2API_SSE_PATCH_AB_MIGRATION_20261106.md`，附录 A/B 摘要分别为：

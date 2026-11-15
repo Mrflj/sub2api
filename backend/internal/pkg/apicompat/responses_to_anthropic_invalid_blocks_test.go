@@ -125,14 +125,13 @@ func TestResponsesToAnthropic_InputFileDataURIBecomesDocument(t *testing.T) {
 	require.Contains(t, string(messages[0].Content), `"data":"JVBERi0="`)
 }
 
-// 只有 file_id、没有 data URI 的 input_file 仍然无法转换，整条消息丢掉。
-func TestResponsesToAnthropic_UserMessageWithOnlyUnknownPartsIsDropped(t *testing.T) {
-	messages := responsesToAnthropicMessages(t, `[
+// OpenAI 文件 ID 不能直接交给另一供应商：明确拒绝，不再丢掉整条文档消息。
+func TestResponsesToAnthropic_UserMessageWithOnlyFileIDIsRejected(t *testing.T) {
+	_, err := ResponsesToAnthropicRequest(&ResponsesRequest{Model: "glm-5.2", Input: json.RawMessage(`[
 		{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file_1"}]}
-	]`)
-
-	requireAnthropicMessagesAreSendable(t, messages)
-	require.Empty(t, messages)
+	]`)})
+	require.ErrorContains(t, err, "file_id")
+	require.True(t, IsUnsupportedRequestConversion(err))
 }
 
 // assistant 侧同理：以前会退化成单个空 text 块，Anthropic 同样拒收。

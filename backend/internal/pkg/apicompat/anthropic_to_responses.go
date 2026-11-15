@@ -31,6 +31,15 @@ type AnthropicToResponsesOptions struct {
 }
 
 func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToResponsesOptions) (*ResponsesRequest, error) {
+	if err := validateAnthropicRequestMedia(req, "responses"); err != nil {
+		return nil, err
+	}
+	if req.TopK != nil {
+		return nil, unsupportedRequestConversion("top_k has no equivalent in Responses; use a native Messages endpoint to retain this generation control")
+	}
+	if len(req.StopSeqs) > 0 {
+		return nil, unsupportedRequestConversion("stop_sequences has no equivalent in Responses; use a native Messages or Chat Completions endpoint to retain this generation control")
+	}
 	if !options.DeferReasoningEffortValidation {
 		if err := openai.ValidateGPT61ReasoningEffort(req.Model, anthropicReasoningEffort(req)); err != nil {
 			return nil, err
@@ -64,9 +73,16 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 
 	storeFalse := false
 	out.Store = &storeFalse
-	parallelToolCalls := true
+	parallelToolCalls := anthropicParallelToolCalls(req.ToolChoice)
 	out.ParallelToolCalls = &parallelToolCalls
 	out.Text = &ResponsesText{Verbosity: "medium"}
+	if req.OutputConfig != nil && len(req.OutputConfig.Format) > 0 {
+		format, err := anthropicOutputFormatToResponsesTextFormat(req.OutputConfig.Format)
+		if err != nil {
+			return nil, err
+		}
+		out.Text.Format = format
+	}
 
 	if req.MaxTokens > 0 {
 		v := req.MaxTokens
@@ -135,6 +151,19 @@ func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage
 		// Pass through unknown types as-is
 		return raw, nil
 	}
+}
+
+// anthropicParallelToolCalls preserves the client's serial-tool constraint.
+// Anthropic carries it inside tool_choice rather than as a request field.
+// Absence retains the bridge's existing parallel-by-default behavior.
+func anthropicParallelToolCalls(raw json.RawMessage) bool {
+	var choice struct {
+		DisableParallelToolUse bool `json:"disable_parallel_tool_use"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &choice) != nil {
+		return true
+	}
+	return !choice.DisableParallelToolUse
 }
 
 // convertAnthropicToResponsesInput builds the Responses API input items array
@@ -263,6 +292,12 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 			if uri := anthropicImageToDataURI(b.Source); uri != "" {
 				parts = append(parts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
 			}
+		case "document":
+			part, err := anthropicDocumentToResponses(b)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, part)
 		}
 	}
 	parts = append(parts, toolResultImageParts...)
@@ -381,6 +416,9 @@ func fromResponsesCallID(id string) string {
 // anthropicImageToDataURI converts an AnthropicImageSource to a data URI string.
 // Returns "" if the source is nil or has no data.
 func anthropicImageToDataURI(src *AnthropicImageSource) string {
+	if src != nil && src.Type == "url" && isHTTPMediaURL(src.URL) {
+		return src.URL
+	}
 	if src == nil || src.Data == "" {
 		return ""
 	}
@@ -395,7 +433,14 @@ func anthropicImageToDataURI(src *AnthropicImageSource) string {
 // block. Returns the text as a string for the function_call_output Output
 // field, plus any image parts that must be sent in a separate user message
 // (the Responses API output field only accepts strings).
-func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesContentPart) {
+func convertToolResultOutput(b AnthropicContentBlock) (text string, images []ResponsesContentPart) {
+	// OpenAI function results have no is_error field. Preserve the execution
+	// status as result data, without changing successful tool results or images.
+	defer func() {
+		if b.IsError {
+			text = encodeToolResultError(text)
+		}
+	}()
 	if len(b.Content) == 0 {
 		return "(empty)", nil
 	}
@@ -428,14 +473,40 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 			if uri := anthropicImageToDataURI(ib.Source); uri != "" {
 				imageParts = append(imageParts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
 			}
+		case "document":
+			// Request validation already rejected unsupported document sources.
+			if part, err := anthropicDocumentToResponses(ib); err == nil {
+				imageParts = append(imageParts, part)
+			}
 		}
 	}
 
-	text := strings.Join(textParts, "\n\n")
+	text = strings.Join(textParts, "\n\n")
 	if text == "" {
 		text = "(empty)"
 	}
 	return text, imageParts
+}
+
+func encodeToolResultError(content string) string {
+	// Conversion chains can encounter an already encoded error. Only our exact
+	// two-field envelope is recognized; arbitrary JSON tool output stays intact.
+	var existing map[string]json.RawMessage
+	if json.Unmarshal([]byte(content), &existing) == nil && len(existing) == 2 {
+		var isError bool
+		var message string
+		contentJSON := strings.TrimSpace(string(existing["content"]))
+		if json.Unmarshal(existing["is_error"], &isError) == nil && isError &&
+			strings.HasPrefix(contentJSON, `"`) &&
+			json.Unmarshal(existing["content"], &message) == nil {
+			return content
+		}
+	}
+	encoded, _ := json.Marshal(struct {
+		IsError bool   `json:"is_error"`
+		Content string `json:"content"`
+	}{IsError: true, Content: content})
+	return string(encoded)
 }
 
 // extractAnthropicTextFromBlocks joins all text blocks, ignoring thinking/

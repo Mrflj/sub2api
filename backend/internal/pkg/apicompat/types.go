@@ -24,6 +24,7 @@ type AnthropicRequest struct {
 	Stream      bool               `json:"stream,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	TopP        *float64           `json:"top_p,omitempty"`
+	TopK        *int               `json:"top_k,omitempty"`
 	StopSeqs    []string           `json:"stop_sequences,omitempty"`
 	Thinking    *AnthropicThinking `json:"thinking,omitempty"`
 	ToolChoice  json.RawMessage    `json:"tool_choice,omitempty"`
@@ -38,7 +39,8 @@ type AnthropicRequest struct {
 
 // AnthropicOutputConfig controls output generation parameters.
 type AnthropicOutputConfig struct {
-	Effort string `json:"effort,omitempty"` // "low" | "medium" | "high" | "max"
+	Effort string          `json:"effort,omitempty"` // "low" | "medium" | "high" | "max"
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 // AnthropicThinking configures extended thinking in the Anthropic API.
@@ -71,6 +73,7 @@ type AnthropicContentBlock struct {
 
 	// type=image
 	Source *AnthropicImageSource `json:"source,omitempty"`
+	Title  string                `json:"title,omitempty"` // type=document
 
 	// type=tool_use
 	ID    string          `json:"id,omitempty"`
@@ -111,9 +114,11 @@ func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {
 
 // AnthropicImageSource describes the source data for an image content block.
 type AnthropicImageSource struct {
-	Type      string `json:"type"` // "base64"
-	MediaType string `json:"media_type"`
-	Data      string `json:"data"`
+	Type      string `json:"type"` // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+	FileID    string `json:"file_id,omitempty"`
 }
 
 // AnthropicTool describes a tool available to the model.
@@ -239,6 +244,7 @@ type ResponsesRequest struct {
 	MaxOutputTokens    *int                `json:"max_output_tokens,omitempty"`
 	Temperature        *float64            `json:"temperature,omitempty"`
 	TopP               *float64            `json:"top_p,omitempty"`
+	TopLogprobs        *int                `json:"top_logprobs,omitempty"`
 	Stream             bool                `json:"stream,omitempty"`
 	Tools              []ResponsesTool     `json:"tools,omitempty"`
 	Include            []string            `json:"include,omitempty"`
@@ -321,11 +327,13 @@ type ResponsesContentPart struct {
 	Text                  string          `json:"text,omitempty"`
 	Refusal               string          `json:"refusal,omitempty"`   // type=refusal
 	ImageURL              string          `json:"image_url,omitempty"` // data URI for input_image
+	Detail                string          `json:"detail,omitempty"`
 
 	// input_file fields.
 	Filename string `json:"filename,omitempty"`
 	FileData string `json:"file_data,omitempty"` // data URI
 	FileID   string `json:"file_id,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
 }
 
 // ResponsesTool describes a tool in the Responses API.
@@ -695,6 +703,14 @@ type ChatCompletionsRequest struct {
 	MaxCompletionTokens *int               `json:"max_completion_tokens,omitempty"`
 	Temperature         *float64           `json:"temperature,omitempty"`
 	TopP                *float64           `json:"top_p,omitempty"`
+	TopLogprobs         *int               `json:"top_logprobs,omitempty"`
+	Logprobs            *bool              `json:"logprobs,omitempty"`
+	Verbosity           string             `json:"verbosity,omitempty"`
+	FrequencyPenalty    *float64           `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64           `json:"presence_penalty,omitempty"`
+	Seed                *int64             `json:"seed,omitempty"`
+	LogitBias           json.RawMessage    `json:"logit_bias,omitempty"`
+	N                   *int               `json:"n,omitempty"`
 	Stream              bool               `json:"stream,omitempty"`
 	StreamOptions       *ChatStreamOptions `json:"stream_options,omitempty"`
 	Tools               []ChatTool         `json:"tools,omitempty"`
@@ -761,6 +777,7 @@ type ChatContentPart struct {
 	Text                  string          `json:"text,omitempty"`
 	ImageURL              *ChatImageURL   `json:"image_url,omitempty"`
 	File                  *ChatFile       `json:"file,omitempty"`
+	VideoURL              json.RawMessage `json:"video_url,omitempty"`
 }
 
 // ChatImageURL contains the URL for an image content part.

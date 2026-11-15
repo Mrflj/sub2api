@@ -215,39 +215,48 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
 	anthropicState := apicompat.NewChatCompletionsToAnthropicStreamState(openAIClientResponseModel(c, originalModel))
-	clientDisconnected := false
+	output := s.newCCStreamWriteState(account)
+	defer func() {
+		if err := output.preamble.Close(); err != nil {
+			logger.L().Warn("openai messages chat fallback: preamble cleanup failed", zap.Error(err), zap.String("request_id", requestID))
+		}
+	}()
 
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
 		// CC chunk → Anthropic events (direct, single state machine)
 		anthropicEvents := apicompat.ChatCompletionsChunkToAnthropicEvents(chunk, anthropicState)
-		if clientDisconnected {
+		if output.disconnected {
 			return
 		}
+		release := chatChunkStartsResponsesOutput(chunk)
 		for _, aEvt := range anthropicEvents {
 			sse, err := apicompat.ResponsesAnthropicEventToSSE(aEvt)
 			if err != nil {
 				continue
 			}
-			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-				clientDisconnected = true
-				break
-			}
+			output.write(c, writeStreamHeaders, sse, release)
 		}
-		if !clientDisconnected && len(anthropicEvents) > 0 {
+		if !output.disconnected && output.started && len(anthropicEvents) > 0 {
 			c.Writer.Flush()
 		}
 	}
 
 	scan := s.scanCCStream(c, resp, account, "openai messages chat fallback", requestID, startTime, emitChunk)
 	usage := scan.Usage
+	if scan.Err == nil {
+		scan.Err = output.err
+	}
 
 	if scan.Err != nil {
 		// Broken upstream read: skip finalization so no synthetic message_stop
 		// masks the truncation, and surface the error to flag usage incomplete
 		// (mirrors forwardResponsesViaRawChatCompletions).
+		streamErr := s.handleCCStreamScanError(c, account, resp, upstreamModel, scan.Err, output.disconnected, writeAnthropicError, func(_ []byte, message string) {
+			_, _ = fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("api_error", message))
+			c.Writer.Flush()
+		})
 		return &OpenAIForwardResult{
 			RequestID:                     requestID,
 			UpstreamHeaders:               resp.Header,
@@ -263,30 +272,26 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			Stream:                        true,
 			Duration:                      time.Since(startTime),
 			FirstTokenMs:                  scan.FirstTokenMs,
-			ClientDisconnect:              clientDisconnected,
-		}, fmt.Errorf("stream usage incomplete: %w", scan.Err)
+			ClientDisconnect:              output.disconnected,
+		}, streamErr
 	}
 
 	// Finalize: close open blocks + emit message_delta/message_stop.
 	finalEvents := apicompat.FinalizeChatCompletionsAnthropicStream(anthropicState)
-	if !clientDisconnected {
+	if !output.disconnected {
 		for _, aEvt := range finalEvents {
 			sse, err := apicompat.ResponsesAnthropicEventToSSE(aEvt)
 			if err != nil {
 				continue
 			}
-			writeStreamHeaders()
-			if _, err := fmt.Fprint(c.Writer, sse); err != nil {
-				clientDisconnected = true
-				break
-			}
+			output.write(c, writeStreamHeaders, sse, true)
 		}
 		c.Writer.Flush()
 	}
 	if !scan.SawDone {
 		logCCStreamMissingDoneSentinel("openai messages chat fallback", requestID)
 	}
-	if !scan.SawDone || clientDisconnected {
+	if !scan.SawDone || output.disconnected {
 		usage.CacheReadKnown = false
 	}
 
@@ -305,6 +310,6 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		Stream:                        true,
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  scan.FirstTokenMs,
-		ClientDisconnect:              clientDisconnected,
+		ClientDisconnect:              output.disconnected,
 	}, nil
 }

@@ -1052,10 +1052,12 @@ func TestChatCompletionsToResponses_ToolArrayContent(t *testing.T) {
 
 	var items []ResponsesInputItem
 	require.NoError(t, json.Unmarshal(resp.Input, &items))
-	require.Len(t, items, 3)
+	require.Len(t, items, 4)
 	assert.Equal(t, "function_call_output", items[2].Type)
 	assert.Equal(t, "call_1", items[2].CallID)
 	assert.Equal(t, "image width: 100; image height: 200", items[2].Output)
+	assert.Equal(t, "user", items[3].Role)
+	assert.Contains(t, string(items[3].Content), "data:image/png;base64,ignored")
 }
 
 func TestResponsesToChatCompletions_Incomplete(t *testing.T) {

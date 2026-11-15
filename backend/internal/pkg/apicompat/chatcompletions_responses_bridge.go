@@ -46,6 +46,9 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 	if req == nil {
 		return nil, fmt.Errorf("responses request is nil")
 	}
+	if err := validateResponsesToolOutputMedia(req.Input); err != nil {
+		return nil, err
+	}
 
 	messages, err := responsesInputToChatMessagesWithOptions(req.Instructions, req.Input, opts)
 	if err != nil {
@@ -61,6 +64,15 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 		Stream:              req.Stream,
 		ServiceTier:         req.ServiceTier,
 		ParallelToolCalls:   req.ParallelToolCalls,
+		TopLogprobs:         req.TopLogprobs,
+	}
+	if req.TopLogprobs != nil {
+		out.Logprobs = boolPtr(true)
+	}
+	for _, include := range req.Include {
+		if include == "message.output_text.logprobs" {
+			out.Logprobs = boolPtr(true)
+		}
 	}
 	if req.Reasoning != nil {
 		out.ReasoningEffort = req.Reasoning.Effort
@@ -95,6 +107,7 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 	}
 	if req.Text != nil {
 		out.ResponseFormat = responsesTextFormatToChatResponseFormat(req.Text.Format)
+		out.Verbosity = req.Text.Verbosity
 	}
 
 	return out, nil
@@ -639,7 +652,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			pendingReasoning = ""
 			lastTurnReasoning = ""
 			continue
-		case "input_image":
+		case "input_image", "input_file", "video_url", "input_video", "video", "input_audio", "audio":
 			content, err := chatContentFromSingleResponsesPart(itemType, item)
 			if err != nil {
 				return nil, nil, err
@@ -793,11 +806,25 @@ func rewriteToolOutputMediaValue(value any) (any, []ChatContentPart, bool) {
 		}
 		return typed, media, changed
 	case map[string]any:
+		if typed["type"] == "input_file" {
+			fileData, _ := typed["file_data"].(string)
+			fileID, _ := typed["file_id"].(string)
+			filename, _ := typed["filename"].(string)
+			part, err := responsesMediaToChatPart(ResponsesContentPart{Type: "input_file", FileData: fileData, FileID: fileID, Filename: filename})
+			if err == nil {
+				return map[string]any{"type": "input_text", "text": toolOutputMediaMarker}, []ChatContentPart{part}, true
+			}
+		}
 		if imageURL, ok := recognizedToolOutputImageURL(typed); ok {
+			part := toolOutputImagePart(imageURL)
+			part.ImageURL.Detail, _ = typed["detail"].(string)
+			if image, ok := typed["image_url"].(map[string]any); ok && part.ImageURL.Detail == "" {
+				part.ImageURL.Detail, _ = image["detail"].(string)
+			}
 			return map[string]any{
 				"type": "input_text",
 				"text": toolOutputMediaMarker,
-			}, []ChatContentPart{toolOutputImagePart(imageURL)}, true
+			}, []ChatContentPart{part}, true
 		}
 
 		content, ok := typed["content"]
@@ -952,7 +979,14 @@ func normalizeChatMessagesWithToolOutputMedia(messages []ChatMessage, mediaByCal
 					Type: "text",
 					Text: fmt.Sprintf(toolOutputMediaAttribution, tc.ID),
 				})
-				mediaParts = append(mediaParts, media...)
+				for _, part := range media {
+					if part.ImageURL != nil && part.ImageURL.Detail == "original" {
+						image := *part.ImageURL
+						image.Detail = "high"
+						part.ImageURL = &image
+					}
+					mediaParts = append(mediaParts, part)
+				}
 			}
 			if len(mediaParts) > 0 {
 				content, _ := json.Marshal(mediaParts)
@@ -1080,19 +1114,15 @@ func responsesContentPartsToChatContent(rawParts []json.RawMessage, role string)
 			}
 			textParts = append(textParts, text)
 			chatParts = append(chatParts, ChatContentPart{Type: "text", Text: text})
-		case "input_image", "image_url":
-			imageURL := rawString(part["image_url"])
-			if imageURL == "" {
-				imageURL = rawNestedString(part["image_url"], "url")
-			}
-			if imageURL == "" {
-				continue
+		case "input_image", "image_url", "input_file":
+			converted, err := responsesRawMediaToChatPart(partType, part)
+			if err != nil {
+				return nil, err
 			}
 			hasNonText = true
-			chatParts = append(chatParts, ChatContentPart{
-				Type:     "image_url",
-				ImageURL: &ChatImageURL{URL: imageURL},
-			})
+			chatParts = append(chatParts, converted)
+		case "video_url", "input_video", "video", "input_audio", "audio":
+			return nil, unsupportedRequestConversion("Responses content type %q is not supported by this protocol conversion; use a native media-capable endpoint", partType)
 		}
 	}
 
@@ -1101,8 +1131,7 @@ func responsesContentPartsToChatContent(rawParts []json.RawMessage, role string)
 		return joined, nil
 	}
 	if role != "user" {
-		joined, _ := json.Marshal(strings.Join(textParts, "\n\n"))
-		return joined, nil
+		return nil, unsupportedRequestConversion("media in Responses role %q cannot be converted to Chat Completions without losing content", role)
 	}
 	if len(chatParts) == 0 {
 		empty, _ := json.Marshal("")
@@ -1113,18 +1142,34 @@ func responsesContentPartsToChatContent(rawParts []json.RawMessage, role string)
 
 func chatContentFromSingleResponsesPart(partType string, part map[string]json.RawMessage) (json.RawMessage, error) {
 	switch partType {
-	case "input_image", "image_url":
-		imageURL := rawString(part["image_url"])
-		if imageURL == "" {
-			imageURL = rawNestedString(part["image_url"], "url")
+	case "input_image", "image_url", "input_file":
+		converted, err := responsesRawMediaToChatPart(partType, part)
+		if err != nil {
+			return nil, err
 		}
-		return json.Marshal([]ChatContentPart{{
-			Type:     "image_url",
-			ImageURL: &ChatImageURL{URL: imageURL},
-		}})
+		return json.Marshal([]ChatContentPart{converted})
+	case "video_url", "input_video", "video", "input_audio", "audio":
+		return nil, unsupportedRequestConversion("Responses content type %q is not supported by this protocol conversion; use a native media-capable endpoint", partType)
 	default:
 		return json.Marshal(rawString(part["text"]))
 	}
+}
+
+func responsesRawMediaToChatPart(partType string, part map[string]json.RawMessage) (ChatContentPart, error) {
+	imageURL := rawString(part["image_url"])
+	detail := rawString(part["detail"])
+	if imageURL == "" {
+		imageURL = rawNestedString(part["image_url"], "url")
+		if detail == "" {
+			detail = rawNestedString(part["image_url"], "detail")
+		}
+	}
+	return responsesMediaToChatPart(ResponsesContentPart{
+		Type: partType, ImageURL: imageURL, Detail: detail,
+		Filename: rawString(part["filename"]), FileData: rawString(part["file_data"]),
+		FileID: rawString(part["file_id"]), FileURL: rawString(part["file_url"]),
+		PromptCacheBreakpoint: part["prompt_cache_breakpoint"],
+	})
 }
 
 // customToolInputSchema 是 custom/freeform 工具降级为 function 工具时的参数 schema。

@@ -7,11 +7,11 @@ import (
 )
 
 type responsesToolOutputMedia struct {
-	callID   string
-	imageURL string
+	callID string
+	part   map[string]any
 }
 
-// LiftResponsesToolOutputMedia moves image parts out of Responses tool outputs
+// LiftResponsesToolOutputMedia moves image/file parts out of Responses tool outputs
 // and into a following user message. Native Responses endpoints such as
 // DeepSeek accept function_call_output.output as a string, but Codex view_image
 // returns an array containing input_image. Keeping the image inside the tool
@@ -104,16 +104,29 @@ func liftResponsesToolOutputMediaItem(item map[string]any) (any, []responsesTool
 	callID := strings.TrimSpace(stringValue(item["call_id"]))
 	lifted := make([]responsesToolOutputMedia, 0, len(media))
 	for _, part := range media {
-		if part.ImageURL == nil {
-			continue
-		}
-		imageURL := strings.TrimSpace(part.ImageURL.URL)
-		if imageURL == "" {
+		var responsePart map[string]any
+		if part.ImageURL != nil && strings.TrimSpace(part.ImageURL.URL) != "" {
+			responsePart = map[string]any{"type": "input_image", "image_url": part.ImageURL.URL}
+			if part.ImageURL.Detail != "" {
+				responsePart["detail"] = part.ImageURL.Detail
+			}
+		} else if part.File != nil {
+			responsePart = map[string]any{"type": "input_file"}
+			if part.File.FileData != "" {
+				responsePart["file_data"] = part.File.FileData
+			}
+			if part.File.FileID != "" {
+				responsePart["file_id"] = part.File.FileID
+			}
+			if part.File.Filename != "" {
+				responsePart["filename"] = part.File.Filename
+			}
+		} else {
 			continue
 		}
 		lifted = append(lifted, responsesToolOutputMedia{
-			callID:   callID,
-			imageURL: imageURL,
+			callID: callID,
+			part:   responsePart,
 		})
 	}
 	return item, lifted, true
@@ -134,10 +147,7 @@ func buildResponsesToolOutputMediaMessage(pending []responsesToolOutputMedia) ma
 			})
 			lastCallID = media.callID
 		}
-		content = append(content, map[string]any{
-			"type":      "input_image",
-			"image_url": media.imageURL,
-		})
+		content = append(content, media.part)
 	}
 
 	return map[string]any{

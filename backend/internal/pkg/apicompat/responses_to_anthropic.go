@@ -54,6 +54,11 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 				Name:  item.Name,
 				Input: sanitizeAnthropicToolUseInput(item.Name, item.Arguments),
 			})
+		case "custom_tool_call":
+			blocks = append(blocks, AnthropicContentBlock{
+				Type: "tool_use", ID: fromResponsesCallID(item.CallID), Name: item.Name,
+				Input: json.RawMessage(responsesAnthropicCustomToolInput(item.Input)),
+			})
 		case "web_search_call":
 			toolUseID := "srvtoolu_" + item.ID
 			query := ""
@@ -190,6 +195,9 @@ type ResponsesEventToAnthropicState struct {
 
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
+	// Tool streams may interleave by output_index, while Anthropic consumers
+	// expect each content block to remain open until its final argument data.
+	toolStream *responsesAnthropicToolStream
 
 	// textByPart records the text already delivered for each output_text part
 	// so that a done payload can be reconciled against it. It outlives the
@@ -223,6 +231,21 @@ func ResponsesEventToAnthropicEvents(
 	evt *ResponsesStreamEvent,
 	state *ResponsesEventToAnthropicState,
 ) []AnthropicStreamEvent {
+	if state.MessageStopSent {
+		return nil
+	}
+	if state.toolStream == nil && (isResponsesAnthropicToolAdded(evt) ||
+		(evt.Type == "response.output_item.done" && isResponsesAnthropicToolItem(evt.Item)) ||
+		responsesAnthropicTerminalHasTools(evt)) {
+		state.toolStream = newResponsesAnthropicToolStream()
+	}
+	if state.toolStream != nil {
+		return state.toolStream.convert(evt, state)
+	}
+	return resToAnthConvertEvent(evt, state)
+}
+
+func resToAnthConvertEvent(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	switch evt.Type {
 	case "response.created":
 		return resToAnthHandleCreated(evt, state)
@@ -236,7 +259,12 @@ func ResponsesEventToAnthropicEvents(
 		// custom/freeform 工具的输入增量与 function_call 参数增量同形。
 		"response.custom_tool_call_input.delta":
 		return resToAnthHandleFuncArgsDelta(evt, state)
-	case "response.function_call_arguments.done":
+	case "response.function_call_arguments.done", "response.custom_tool_call_input.done":
+		if evt.Type == "response.custom_tool_call_input.done" && evt.Arguments == "" {
+			copy := *evt
+			copy.Arguments = evt.Input
+			return resToAnthHandleFuncArgsDone(&copy, state)
+		}
 		return resToAnthHandleFuncArgsDone(evt, state)
 	case "response.output_item.done":
 		return resToAnthHandleOutputItemDone(evt, state)
@@ -266,6 +294,9 @@ func FinalizeResponsesAnthropicStream(state *ResponsesEventToAnthropicState) []A
 	}
 
 	var events []AnthropicStreamEvent
+	if state.toolStream != nil {
+		events = append(events, state.toolStream.drain(state, nil, true)...)
+	}
 	events = append(events, closeCurrentBlock(state)...)
 
 	stopReason := "end_turn"

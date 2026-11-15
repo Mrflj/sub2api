@@ -176,6 +176,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		if convertResponsesShape {
 			chatBody, err := s.convertResponsesShapedChatBody(body)
 			if err != nil {
+				if apicompat.IsUnsupportedRequestConversion(err) {
+					writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+				}
 				return nil, err
 			}
 			return s.forwardAsRawChatCompletions(ctx, c, account, chatBody, defaultMappedModel)
@@ -273,6 +276,9 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		chatReq.Model = upstreamModel
 		responsesReq, err = chatCompletionsToResponses(s.cfg, &chatReq)
 		if err != nil {
+			if apicompat.IsUnsupportedRequestConversion(err) {
+				writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+			}
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
 		responsesReq.Model = upstreamModel
