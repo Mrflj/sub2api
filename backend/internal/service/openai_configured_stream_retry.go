@@ -9,13 +9,24 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Configured retries apply only while the attempt has not delivered model
-// output. They may enlarge the private preamble limits, but must never hold a
-// healthy stream until its terminal event.
+// Configured retries protect only the private preamble. Each complete SSE
+// event is classified before delivery; valid output is streamed immediately
+// and must never be held until the response terminal or replayed afterward.
 func openAIStreamConfiguredRetryEnabled(account *Account) bool {
-	return account != nil && account.Platform == PlatformOpenAI &&
-		account.IsPoolMode() && account.GetPoolModeRetryCount() > 0 &&
-		account.IsPoolModeRetryableStatus(http.StatusBadGateway)
+	if account == nil || account.Platform != PlatformOpenAI ||
+		!account.IsPoolMode() || account.GetPoolModeRetryCount() == 0 {
+		return false
+	}
+	codes := account.GetPoolModeRetryStatusCodes()
+	if codes == nil {
+		codes = defaultPoolModeRetryableStatusCodes
+	}
+	for _, code := range codes {
+		if code >= http.StatusBadRequest {
+			return true
+		}
+	}
+	return false
 }
 
 // Keep draining detached upstream streams for usage, but never write queued

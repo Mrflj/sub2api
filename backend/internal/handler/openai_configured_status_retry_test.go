@@ -597,6 +597,9 @@ data: {"response":{"created_at":1793894912,"error":{"code":"bps_stream_error","m
 	if test.failureCode != "" {
 		upstream.body = strings.Replace(upstream.body, `"code":"bps_stream_error"`, fmt.Sprintf(`"code":%q`, test.failureCode), 1)
 	}
+	if test.failureCode == "rate_limit_exceeded" {
+		upstream.body = strings.Replace(upstream.body, `"message":"Upstream request failed, please try again later","type":"bps_stream_error"`, `"message":"Upstream rate limit exceeded, please retry later","type":"tokens"`, 1)
+	}
 	if test.transportErr != nil {
 		upstream.errorFactory = func() error {
 			upstream.mu.Lock()
@@ -757,6 +760,9 @@ data: {"type":"response.completed","response":{"id":"resp_messages_success","sta
 	if test.http400 {
 		wantStatus = http.StatusBadRequest
 	}
+	if test.failureCode == "rate_limit_exceeded" {
+		wantStatus = http.StatusTooManyRequests
+	}
 	if test.transportErr != nil {
 		wantKind, wantStatus = "request_error", 0
 	}
@@ -863,6 +869,26 @@ func TestOpenAIChatConfiguredStatusRetriesSameAccount(t *testing.T) {
 		{name: "opaque_reasoning_recovers_after_two", chat: true, retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, opaquePrelude: true},
 	} {
 		t.Run(test.name, func(t *testing.T) { runMessagesRetryCase(t, test) })
+	}
+}
+
+func TestOpenAIConfiguredStreamErrorsRetryBeforeOutputAndSettleOnce(t *testing.T) {
+	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
+		for _, failure := range []struct {
+			code   string
+			status int
+		}{
+			{code: "bps_stream_error", status: http.StatusBadGateway},
+			{code: "rate_limit_exceeded", status: http.StatusTooManyRequests},
+		} {
+			t.Run(path+"/"+failure.code, func(t *testing.T) {
+				runMessagesRetryCase(t, messagesRetryCase{
+					name: path, retries: 10, retryStatus: failure.status, wantCalls: 3, successAfter: 2,
+					failureCode: failure.code, opaquePrelude: true,
+					chat: path == "chat", responses: path == "native" || path == "passthrough", passthrough: path == "passthrough",
+				})
+			})
+		}
 	}
 }
 

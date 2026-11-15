@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/gin-gonic/gin"
@@ -155,41 +155,52 @@ func (w *configuredRetryOutputRecorder) Flush() {
 
 func TestOpenAIConfiguredStreamRetryFlushesBeforeTerminal(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
-		for _, kind := range []string{"text", "reasoning", "tool"} {
+		outputKinds := []string{"text", "reasoning", "tool"}
+		if path == "native" || path == "passthrough" {
+			outputKinds = append(outputKinds, "web_search")
+		}
+		for _, kind := range outputKinds {
 			t.Run(path+"/"+kind, func(t *testing.T) {
-				needle := map[string]string{"text": "private answer", "reasoning": "private reasoning", "tool": "lookup"}[kind]
-				rec := &configuredRetryOutputRecorder{
-					ResponseRecorder: httptest.NewRecorder(), needle: needle, flushed: make(chan struct{}, 1),
-				}
-				c, _ := gin.CreateTestContext(rec)
-				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-				reader, writer := io.Pipe()
-				defer reader.Close()
-				deliveredBeforeTerminal := make(chan bool, 1)
-				go func() {
-					defer writer.Close()
-					_, err := io.WriteString(writer, configuredRetryEvent(
-						`{"type":"response.created","response":{"id":"resp_live","status":"in_progress"}}`,
-					)+configuredRetryOutput(kind))
-					if err != nil {
-						deliveredBeforeTerminal <- false
-						return
+				synctest.Test(t, func(t *testing.T) {
+					needle := map[string]string{"text": "private answer", "reasoning": "private reasoning", "tool": "lookup", "web_search": "ws_attempt"}[kind]
+					output := configuredRetryOutput(kind)
+					if kind == "web_search" {
+						output = configuredRetryWebSearchOutput()
 					}
-					select {
-					case <-rec.flushed:
-						deliveredBeforeTerminal <- true
-					case <-time.After(2 * time.Second):
-						deliveredBeforeTerminal <- false
+					rec := &configuredRetryOutputRecorder{
+						ResponseRecorder: httptest.NewRecorder(), needle: needle, flushed: make(chan struct{}, 1),
 					}
-					_, _ = io.WriteString(writer, configuredRetryEvent(
-						`{"type":"response.completed","response":{"id":"resp_live","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`,
-					))
-				}()
-				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: reader}
-				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
-				require.NoError(t, err)
-				require.True(t, <-deliveredBeforeTerminal, fmt.Sprintf("%s/%s waited for terminal instead of flushing output", path, kind))
-				require.Contains(t, rec.Body.String(), needle)
+					c, _ := gin.CreateTestContext(rec)
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+					reader, writer := io.Pipe()
+					defer reader.Close()
+					deliveredBeforeTerminal := make(chan bool, 1)
+					go func() {
+						defer writer.Close()
+						_, err := io.WriteString(writer, configuredRetryEvent(
+							`{"type":"response.created","response":{"id":"resp_live","status":"in_progress"}}`,
+						)+output)
+						if err != nil {
+							deliveredBeforeTerminal <- false
+							return
+						}
+						synctest.Wait()
+						select {
+						case <-rec.flushed:
+							deliveredBeforeTerminal <- true
+						default:
+							deliveredBeforeTerminal <- false
+						}
+						_, _ = io.WriteString(writer, configuredRetryEvent(
+							`{"type":"response.completed","response":{"id":"resp_live","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`,
+						))
+					}()
+					resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: reader}
+					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
+					require.NoError(t, err)
+					require.True(t, <-deliveredBeforeTerminal, fmt.Sprintf("%s/%s waited for terminal instead of streaming valid output", path, kind))
+					require.Contains(t, rec.Body.String(), needle)
+				})
 			})
 		}
 	}

@@ -89,16 +89,28 @@ func TestOpenAIConfiguredRetryLargeOpaquePreamble(t *testing.T) {
 }
 
 func TestOpenAIConfiguredRetryStageScope(t *testing.T) {
-	for _, policy := range []string{"pool", "non_pool", "zero", "not_502", "oauth", "grok"} {
+	for _, policy := range []string{"pool", "nil_account", "non_pool", "zero", "negative", "only_429", "default_codes", "empty_codes", "success_only", "mixed_codes", "oauth", "grok"} {
 		t.Run(policy, func(t *testing.T) {
 			a := newConfiguredStreamRetryAccount()
 			switch policy {
+			case "nil_account":
+				a = nil
 			case "non_pool":
 				a.Credentials["pool_mode"] = false
 			case "zero":
 				a.Credentials["pool_mode_retry_count"] = float64(0)
-			case "not_502":
+			case "negative":
+				a.Credentials["pool_mode_retry_count"] = float64(-1)
+			case "only_429":
 				a.Credentials["pool_mode_retry_status_codes"] = []any{float64(429)}
+			case "default_codes":
+				delete(a.Credentials, "pool_mode_retry_status_codes")
+			case "empty_codes":
+				a.Credentials["pool_mode_retry_status_codes"] = []any{}
+			case "success_only":
+				a.Credentials["pool_mode_retry_status_codes"] = []any{float64(200), float64(302)}
+			case "mixed_codes":
+				a.Credentials["pool_mode_retry_status_codes"] = []any{float64(200), float64(429)}
 			case "oauth":
 				a.Type = AccountTypeOAuth
 			case "grok":
@@ -107,7 +119,7 @@ func TestOpenAIConfiguredRetryStageScope(t *testing.T) {
 			s := (&OpenAIGatewayService{}).newOpenAIStreamOutputStage(a)
 			defer s.Close()
 			want := int64(openAIFirstOutputStageMaxBytes)
-			if policy == "pool" {
+			if policy == "pool" || policy == "only_429" || policy == "default_codes" || policy == "mixed_codes" {
 				want = config.DefaultOpenAIStreamRetryMaxBufferBytes
 			}
 			require.Equal(t, want, s.limit)
