@@ -159,9 +159,18 @@ data: ` + payload + `
 					var failoverErr *UpstreamFailoverError
 					wantKind := "failover"
 					if outputStarted {
-						require.NotErrorAs(t, err, &failoverErr, "committed model output cannot be replayed")
 						require.Contains(t, rec.Body.String(), "partial")
-						wantKind = "stream_failed"
+						if retryStatus == http.StatusBadGateway {
+							require.ErrorAs(t, err, &failoverErr)
+							require.True(t, failoverErr.RetryAfterOutput)
+							require.True(t, failoverErr.RetryableOnSameAccount)
+							require.False(t, failoverErr.ShouldRetryNextAccount())
+							require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+							require.NotContains(t, rec.Body.String(), "response.failed")
+						} else {
+							require.NotErrorAs(t, err, &failoverErr, "unconfigured statuses must retain the existing error boundary")
+							wantKind = "stream_failed"
+						}
 					} else {
 						require.ErrorAs(t, err, &failoverErr)
 						require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
@@ -177,7 +186,7 @@ data: ` + payload + `
 					require.Equal(t, wantKind, upstream[0].Kind)
 					require.Equal(t, http.StatusBadGateway, upstream[0].UpstreamStatusCode)
 					require.Equal(t, account.ID, upstream[0].AccountID)
-					require.Equal(t, outputStarted && retryStatus == http.StatusBadGateway, logSink.ContainsMessage("openai.same_account_retry_suppressed"))
+					require.False(t, logSink.ContainsMessage("openai.same_account_retry_suppressed"))
 				})
 			}
 		}

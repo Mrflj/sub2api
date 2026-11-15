@@ -2495,6 +2495,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	// read before usage/terminal events can be collected and settled.
 	upstreamReadCtx, releaseUpstreamReadCtx := openAIPassthroughContext(ctx, account)
 	defer releaseUpstreamReadCtx()
+	pendingRetryErrorHeader := ""
 	for documentScanner.Next(upstreamReadCtx, streamInterval, keepaliveCh, heartbeat) {
 		clientDisconnected = clientDisconnected || openAIStreamClientCanceled(c)
 		line := documentScanner.Text()
@@ -2506,6 +2507,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			pendingSSEEventType = eventType
 			eventType = strings.TrimSpace(eventType)
 			suppressCurrentEvent = codexFailureTerminal && (eventType == "error" || (sawBareError && !sawResponseFailed && eventType != "response.failed"))
+			if configuredStreamRetry && clientOutputStarted && (eventType == "error" || eventType == "response.failed") {
+				// Classify a terminal failure before publishing its event header.
+				pendingRetryErrorHeader = line
+				continue
+			}
 		}
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
@@ -2544,6 +2550,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
 				(eventType == "error" || eventType == "response.failed") &&
 				openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				!openAIStreamAllowsRetryAfterOutput(c, account, dataBytes, extractOpenAISSEErrorMessage(dataBytes), clientDisconnected) &&
 				isOpenAIUpstreamCapacityShedEvent(dataBytes) {
 				logOpenAICapacityFailoverSuppressed(ctx, account, "passthrough_sse", upstreamRequestID, eventType)
 				capacityFailoverSuppressedLogged = true
@@ -2578,6 +2585,11 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if outputStarted && !cyberHit && imageCounter.Count() == 0 {
+					if retry := s.openAIStreamRetryAfterOutputError(c, account, true, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header, clientDisconnected); retry != nil {
+						return resultWithUsage(), retry
+					}
+				}
 				if !outputStarted && !cyberHit {
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						return resultWithUsage(), compactErr
@@ -2775,6 +2787,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				if !writePendingLines() {
 					continue
 				}
+			}
+			if pendingRetryErrorHeader != "" {
+				if _, err := fmt.Fprintln(w, pendingRetryErrorHeader); err != nil {
+					clientDisconnected = true
+					continue
+				}
+				pendingRetryErrorHeader = ""
 			}
 			if _, err := fmt.Fprintln(w, line); err != nil {
 				clientDisconnected = true

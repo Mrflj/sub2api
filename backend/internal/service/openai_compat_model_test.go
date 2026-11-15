@@ -624,12 +624,12 @@ func TestForwardAsAnthropic_DoesNotAutoDerivePromptCacheKeyForNonCodexModel(t *t
 	require.Empty(t, upstream.lastReq.Header.Get("session_id"))
 }
 
-func TestForwardAsAnthropic_TrimsFullReplayOnlyForCodexCompatModels(t *testing.T) {
+func TestForwardAsAnthropic_KeepsFullReplayForCompatModels(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
-	messages := make([]string, 0, openAICompatAnthropicReplayMaxTailMessages+3)
-	for i := 0; i < openAICompatAnthropicReplayMaxTailMessages+3; i++ {
+	messages := make([]string, 0, legacyAnthropicReplayWindow+3)
+	for i := 0; i < legacyAnthropicReplayWindow+3; i++ {
 		messages = append(messages, `{"role":"user","content":"message-`+fmt.Sprintf("%02d", i)+`"}`)
 	}
 	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[` + strings.Join(messages, ",") + `],"stream":false}`)
@@ -677,14 +677,13 @@ func TestForwardAsAnthropic_TrimsFullReplayOnlyForCodexCompatModels(t *testing.T
 	}
 
 	codexBody := run(t, "gpt-5.3-codex")
-	require.Equal(t, int64(openAICompatAnthropicReplayMaxTailMessages+1), gjson.GetBytes(codexBody, "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(codexBody, "input.0.role").String())
-	require.Contains(t, gjson.GetBytes(codexBody, "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "message-03", gjson.GetBytes(codexBody, "input.1.content.0.text").String())
-	require.Equal(t, "message-14", gjson.GetBytes(codexBody, "input.12.content.0.text").String())
+	require.Equal(t, int64(15), gjson.GetBytes(codexBody, "input.#").Int())
+	require.NotContains(t, string(codexBody), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "message-00", gjson.GetBytes(codexBody, "input.0.content.0.text").String())
+	require.Equal(t, "message-14", gjson.GetBytes(codexBody, "input.14.content.0.text").String())
 
 	nonCompatBody := run(t, "gpt-4o")
-	require.Equal(t, int64(openAICompatAnthropicReplayMaxTailMessages+3), gjson.GetBytes(nonCompatBody, "input.#").Int())
+	require.Equal(t, int64(legacyAnthropicReplayWindow+3), gjson.GetBytes(nonCompatBody, "input.#").Int())
 	require.Equal(t, "message-00", gjson.GetBytes(nonCompatBody, "input.0.content.0.text").String())
 }
 
@@ -692,8 +691,8 @@ func TestForwardAsAnthropic_OAuthCompatKeepsFullReplayForCacheGrowth(t *testing.
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
-	messages := make([]string, 0, openAICompatAnthropicReplayMaxTailMessages+3)
-	for i := 0; i < openAICompatAnthropicReplayMaxTailMessages+3; i++ {
+	messages := make([]string, 0, legacyAnthropicReplayWindow+3)
+	for i := 0; i < legacyAnthropicReplayWindow+3; i++ {
 		messages = append(messages, `{"role":"user","content":"message-`+fmt.Sprintf("%02d", i)+`"}`)
 	}
 	body := []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[` + strings.Join(messages, ",") + `],"stream":false}`)
@@ -723,11 +722,10 @@ func TestForwardAsAnthropic_OAuthCompatKeepsFullReplayForCacheGrowth(t *testing.
 	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "gpt-5.4")
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, int64(openAICompatAnthropicReplayMaxTailMessages+4), gjson.GetBytes(upstream.lastBody, "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
-	require.Contains(t, gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "message-00", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
-	require.Equal(t, "message-14", gjson.GetBytes(upstream.lastBody, "input.15.content.0.text").String())
+	require.Equal(t, int64(15), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.NotContains(t, string(upstream.lastBody), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "message-00", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
+	require.Equal(t, "message-14", gjson.GetBytes(upstream.lastBody, "input.14.content.0.text").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
 }
 
@@ -777,10 +775,9 @@ func TestForwardAsAnthropic_AttachesPreviousResponseIDForCompatContinuation(t *t
 	require.NotNil(t, secondResult)
 	require.Equal(t, "resp_second", secondResult.ResponseID)
 	require.Equal(t, "resp_first", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
-	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
-	require.Contains(t, gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
+	require.Equal(t, int64(1), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.NotContains(t, string(upstream.lastBody), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
 }
 
 func TestForwardAsAnthropic_PreviousResponseIDKeepsMultiToolCallContext(t *testing.T) {
@@ -827,15 +824,15 @@ func TestForwardAsAnthropic_PreviousResponseIDKeepsMultiToolCallContext(t *testi
 	require.NotNil(t, secondResult)
 	require.Equal(t, "resp_first_tools", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
 
+	require.Equal(t, "function_call", gjson.GetBytes(upstream.lastBody, "input.0.type").String())
+	require.Equal(t, "call_one", gjson.GetBytes(upstream.lastBody, "input.0.call_id").String())
 	require.Equal(t, "function_call", gjson.GetBytes(upstream.lastBody, "input.1.type").String())
-	require.Equal(t, "call_one", gjson.GetBytes(upstream.lastBody, "input.1.call_id").String())
-	require.Equal(t, "function_call", gjson.GetBytes(upstream.lastBody, "input.2.type").String())
-	require.Equal(t, "call_two", gjson.GetBytes(upstream.lastBody, "input.2.call_id").String())
+	require.Equal(t, "call_two", gjson.GetBytes(upstream.lastBody, "input.1.call_id").String())
+	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.lastBody, "input.2.type").String())
+	require.Equal(t, "call_one", gjson.GetBytes(upstream.lastBody, "input.2.call_id").String())
 	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.lastBody, "input.3.type").String())
-	require.Equal(t, "call_one", gjson.GetBytes(upstream.lastBody, "input.3.call_id").String())
-	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.lastBody, "input.4.type").String())
-	require.Equal(t, "call_two", gjson.GetBytes(upstream.lastBody, "input.4.call_id").String())
-	require.Equal(t, "continue", gjson.GetBytes(upstream.lastBody, "input.5.content.0.text").String())
+	require.Equal(t, "call_two", gjson.GetBytes(upstream.lastBody, "input.3.call_id").String())
+	require.Equal(t, "continue", gjson.GetBytes(upstream.lastBody, "input.4.content.0.text").String())
 }
 
 func TestForwardAsAnthropic_ReplaysFullToolHistoryWhenPreviousResponseUnavailable(t *testing.T) {
@@ -882,16 +879,15 @@ func TestForwardAsAnthropic_ReplaysFullToolHistoryWhenPreviousResponseUnavailabl
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, "resp_missing", gjson.GetBytes(upstream.bodies[0], "previous_response_id").String())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "previous_response_id").Exists())
-	require.Equal(t, int64(5), gjson.GetBytes(upstream.bodies[1], "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(upstream.bodies[1], "input.0.role").String())
-	require.Contains(t, gjson.GetBytes(upstream.bodies[1], "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "first", gjson.GetBytes(upstream.bodies[1], "input.1.content.0.text").String())
-	require.Equal(t, "function_call", gjson.GetBytes(upstream.bodies[1], "input.2.type").String())
+	require.Equal(t, int64(4), gjson.GetBytes(upstream.bodies[1], "input.#").Int())
+	require.NotContains(t, string(upstream.bodies[1]), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "first", gjson.GetBytes(upstream.bodies[1], "input.0.content.0.text").String())
+	require.Equal(t, "function_call", gjson.GetBytes(upstream.bodies[1], "input.1.type").String())
+	require.Equal(t, "call_1", gjson.GetBytes(upstream.bodies[1], "input.1.call_id").String())
+	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.bodies[1], "input.2.type").String())
 	require.Equal(t, "call_1", gjson.GetBytes(upstream.bodies[1], "input.2.call_id").String())
-	require.Equal(t, "function_call_output", gjson.GetBytes(upstream.bodies[1], "input.3.type").String())
-	require.Equal(t, "call_1", gjson.GetBytes(upstream.bodies[1], "input.3.call_id").String())
-	require.Equal(t, "found", gjson.GetBytes(upstream.bodies[1], "input.3.output").String())
-	require.Equal(t, "second", gjson.GetBytes(upstream.bodies[1], "input.4.content.0.text").String())
+	require.Equal(t, "found", gjson.GetBytes(upstream.bodies[1], "input.2.output").String())
+	require.Equal(t, "second", gjson.GetBytes(upstream.bodies[1], "input.3.content.0.text").String())
 }
 
 func TestOpenAICompatPreviousResponseUnavailableRecognitionIsStrict(t *testing.T) {
@@ -997,9 +993,9 @@ func TestForwardAsAnthropic_APIKeyMetadataSessionSurvivesChangingCacheControlAnc
 
 	metadata := `{"user_id":"{\"device_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"account_uuid\":\"\",\"session_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}"}`
 	firstBody := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":16,"metadata":` + metadata + `,"system":[{"type":"text","text":"project docs","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"first"}],"stream":false}`)
-	messages := make([]string, 0, openAICompatAnthropicReplayMaxTailMessages+4)
+	messages := make([]string, 0, legacyAnthropicReplayWindow+4)
 	messages = append(messages, `{"role":"user","content":[{"type":"text","text":"rewritten context","cache_control":{"type":"ephemeral"}}]}`)
-	for i := 1; i < openAICompatAnthropicReplayMaxTailMessages+4; i++ {
+	for i := 1; i < legacyAnthropicReplayWindow+4; i++ {
 		messages = append(messages, `{"role":"user","content":"message-`+fmt.Sprintf("%02d", i)+`"}`)
 	}
 	secondBody := []byte(`{"model":"claude-haiku-4-5-20251001","max_tokens":16,"metadata":` + metadata + `,"messages":[` + strings.Join(messages, ",") + `],"stream":false}`)
@@ -1049,11 +1045,10 @@ func TestForwardAsAnthropic_APIKeyMetadataSessionSurvivesChangingCacheControlAnc
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, firstKey, gjson.GetBytes(upstream.bodies[1], "prompt_cache_key").String())
 	require.False(t, gjson.GetBytes(upstream.bodies[1], "previous_response_id").Exists())
-	require.Equal(t, int64(openAICompatAnthropicReplayMaxTailMessages+5), gjson.GetBytes(upstream.bodies[1], "input.#").Int())
-	require.Equal(t, "developer", gjson.GetBytes(upstream.bodies[1], "input.0.role").String())
-	require.Contains(t, gjson.GetBytes(upstream.bodies[1], "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "rewritten context", gjson.GetBytes(upstream.bodies[1], "input.1.content.0.text").String())
-	require.Equal(t, "message-15", gjson.GetBytes(upstream.bodies[1], "input.16.content.0.text").String())
+	require.Equal(t, int64(16), gjson.GetBytes(upstream.bodies[1], "input.#").Int())
+	require.NotContains(t, string(upstream.bodies[1]), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "rewritten context", gjson.GetBytes(upstream.bodies[1], "input.0.content.0.text").String())
+	require.Equal(t, "message-15", gjson.GetBytes(upstream.bodies[1], "input.15.content.0.text").String())
 }
 
 func TestForwardAsAnthropic_DoesNotAttachPreviousResponseIDForOAuthCompat(t *testing.T) {
@@ -1407,7 +1402,7 @@ func TestForwardAsAnthropic_OAuthKeepsSystemAsDeveloperInput(t *testing.T) {
 	requireOpenAIMessagesCodexIdentity(t, upstream.requests[0], codexCLIUserAgent, openai.CodexDefaultOriginator)
 }
 
-func TestForwardAsAnthropic_OAuthAddsClaudeCodeTodoGuardForCompatModel(t *testing.T) {
+func TestForwardAsAnthropic_OAuthPreservesClientInstructionsWithoutTodoGuard(t *testing.T) {
 	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
@@ -1439,9 +1434,10 @@ func TestForwardAsAnthropic_OAuthAddsClaudeCodeTodoGuardForCompatModel(t *testin
 	require.NotNil(t, result)
 	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 	require.Equal(t, "project instructions", gjson.GetBytes(upstream.lastBody, "input.0.content.0.text").String())
-	require.Equal(t, "developer", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
-	require.Contains(t, gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.2.role").String())
+	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int())
+	require.NotContains(t, string(upstream.lastBody), "sub2api-claude-code-todo-guard")
+	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
+	require.Equal(t, "review files", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
 }
 
 func TestForwardAsAnthropic_OAuthPreservesClaudeCodeToolCallID(t *testing.T) {
@@ -2328,10 +2324,10 @@ func TestForwardAsAnthropic_AstraContinuationRestoresHistoryAndDisablesUnsupport
 			for _, sent := range upstream.bodies[1:] {
 				require.False(t, gjson.GetBytes(sent, "previous_response_id").Exists())
 				require.Equal(t, "astra-session", gjson.GetBytes(sent, "prompt_cache_key").String())
-				require.Equal(t, int64(4), gjson.GetBytes(sent, "input.#").Int())
-				require.Contains(t, gjson.GetBytes(sent, "input.0.content.0.text").String(), "<sub2api-claude-code-todo-guard>")
-				require.Equal(t, "first", gjson.GetBytes(sent, "input.1.content.0.text").String())
-				require.Equal(t, "second", gjson.GetBytes(sent, "input.3.content.0.text").String())
+				require.Equal(t, int64(3), gjson.GetBytes(sent, "input.#").Int())
+				require.NotContains(t, string(sent), "sub2api-claude-code-todo-guard")
+				require.Equal(t, "first", gjson.GetBytes(sent, "input.0.content.0.text").String())
+				require.Equal(t, "second", gjson.GetBytes(sent, "input.2.content.0.text").String())
 			}
 		})
 	}

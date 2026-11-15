@@ -662,6 +662,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if !capacityFailoverSuppressedLogged && account != nil && account.Platform == PlatformOpenAI &&
 				(eventType == "error" || eventType == "response.failed") &&
 				openAIStreamClientOutputStarted(c, clientOutputStarted) &&
+				!openAIStreamAllowsRetryAfterOutput(c, account, dataBytes, extractOpenAISSEErrorMessage(dataBytes), clientDisconnected) &&
 				isOpenAIUpstreamCapacityShedEvent(dataBytes) {
 				logOpenAICapacityFailoverSuppressed(ctx, account, "native_sse", upstreamRequestID, eventType)
 				capacityFailoverSuppressedLogged = true
@@ -682,8 +683,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				if failedMessage == "" {
 					failedMessage = "Upstream response failed"
 				}
-				configuredEncryptedRetry := !clientDisconnected && ctx.Err() == nil &&
-					!openAIStreamClientOutputStarted(c, clientOutputStarted) && openAIConfiguredEncryptedContentRetry(account, 0, dataBytes)
+				configuredEncryptedRetry := !clientDisconnected && ctx.Err() == nil && openAIConfiguredEncryptedContentRetry(account, 0, dataBytes)
 				if !configuredEncryptedRetry && isOpenAIInvalidEncryptedContentEvent(dataBytes) {
 					markOpenAIStreamInvalidEncryptedContent(c, dataBytes)
 				}
@@ -710,6 +710,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				if outputStarted && !cyberHit && imageCounter.Count() == 0 {
+					if retry := s.openAIStreamRetryAfterOutputError(c, account, false, upstreamRequestID, dataBytes, failedMessage, mappedModel, resp.Header, clientDisconnected); retry != nil {
+						sawFailedEvent = true
+						streamEarlyErr = retry
+						return
+					}
+				}
 				if stageFirstOutput && !outputStarted && !responsesSemanticOutputSeen && !eventStartsClientOutput &&
 					!clientDisconnected && !cyberHit && !configuredEncryptedRetry && ctx.Err() == nil && isOpenAIInvalidEncryptedContentSSE(dataBytes, eventType) {
 					if policy, ok := ctx.Value(openAIEncryptedContentRecoveryContextKey{}).(openAIEncryptedContentRecoveryPolicy); ok &&
@@ -738,9 +745,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						bareErrorAccountSideEffectsPending = false
 					}
 					if eventType == "response.failed" || (eventType == "error" && !codexFailureTerminal) {
-						// API-key bare errors are terminal too. Once output is committed, failover replay is unsafe. Keep
-						// the terminal event on the existing stream, but retain the upstream
-						// request ID and payload for operations diagnostics.
+						// Failures not admitted for configured post-output retry stay
+						// on the current stream, with their upstream request ID and
+						// payload retained for operations diagnostics.
 						logOpenAIConfiguredRetrySuppressed(ctx, c, account, false, upstreamRequestID, firstClientOutputEvent, firstClientOutputItemType, openAIStreamFailureStatus(dataBytes, failedMessage))
 						s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID, "stream_failed", dataBytes, failedMessage)
 					}

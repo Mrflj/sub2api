@@ -83,12 +83,12 @@ func TestOpenAIEncryptedContentPoolRetryPolicy(t *testing.T) {
 	require.False(t, openAIConfiguredEncryptedContentRetry(nil, 400, []byte(encryptedPoolRetryFailure)))
 }
 
-func TestOpenAIEncryptedContentPoolRetryDoesNotReplayCommittedOutput(t *testing.T) {
+func TestOpenAIEncryptedContentPoolRetryAfterOutput(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, output := range []string{"text", "tool"} {
 			t.Run(fmt.Sprintf("%s/%s", path, output), func(t *testing.T) {
 				account := newConfiguredStreamRetryAccount()
-				// A configured 400 retry must not replay answer output already sent.
+				// Retry the unchanged ciphertext only on the original account.
 				account.Credentials["pool_mode_retry_status_codes"] = []any{float64(400)}
 				c, _ := newOpenAIConfiguredRetryContext()
 				body := configuredRetryOutput(output)
@@ -98,7 +98,9 @@ func TestOpenAIEncryptedContentPoolRetryDoesNotReplayCommittedOutput(t *testing.
 				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body + configuredRetryEvent(encryptedPoolRetryFailure)))}
 				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
 				var retry *UpstreamFailoverError
-				require.NotErrorAs(t, err, &retry)
+				require.ErrorAs(t, err, &retry)
+				require.True(t, retry.RetryAfterOutput)
+				require.False(t, retry.ShouldRetryNextAccount())
 				require.True(t, c.Writer.Written())
 			})
 		}

@@ -913,6 +913,17 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
 	state := apicompat.NewResponsesEventToChatState()
+	resumedOutput := false
+	if account != nil && OpenAIStreamRetryAccountID(c.Request.Context()) == account.ID {
+		if previous, ok := c.Get(openAIChatOutputRetryStateKey); ok {
+			if prior, ok := previous.(*apicompat.ResponsesEventToChatState); ok {
+				state.ID, state.Created = prior.ID, prior.Created
+				state.SentRole, state.SawToolCall = prior.SentRole, prior.SawToolCall
+				state.NextToolCallIndex = prior.NextToolCallIndex
+				resumedOutput = true
+			}
+		}
+	}
 	state.Model = openAIClientResponseModel(c, originalModel)
 	// 网关作为计费链路的一环，不能把下游 usage 输出绑定到客户端是否显式请求。
 	// raw Chat Completions 直转路径已经强制透出 usage，这里保持同样行为，避免级联代理计费为 0。
@@ -1061,6 +1072,13 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				}
 				return true
 			}
+			if clientOutputStarted {
+				if retry := s.openAIStreamRetryAfterOutputError(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header, clientDisconnected); retry != nil {
+					c.Set(openAIChatOutputRetryStateKey, state)
+					streamFailoverErr = retry
+					return true
+				}
+			}
 			shouldFailover := openAIStreamFailedEventShouldFailover(payloadBytes, message)
 			if strings.TrimSpace(event.Type) == "error" {
 				shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)
@@ -1123,7 +1141,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					"message": clientMsg,
 				},
 			})
-			if c != nil && c.Writer != nil && !c.Writer.Written() {
+			if c != nil && c.Writer != nil && !c.Writer.Written() && !clientDisconnected {
 				writeChatCompletionsError(c, defaultStatus, defaultErrType, clientMsg)
 				clientOutputStarted = true
 			} else if c != nil && c.Writer != nil && !clientDisconnected {
@@ -1143,6 +1161,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 		if retryStage != nil && (openAIStreamDataStartsClientOutput(payload, strings.TrimSpace(event.Type)) || openAIStreamDataIsOpaquePreamble(payload, strings.TrimSpace(event.Type))) && !isTerminalEvent {
 			observeOpenAIHTTPProgress(c.Request.Context())
+		}
+		if resumedOutput && event.Type == "response.created" && event.Response != nil {
+			event.Response.ID = state.ID
 		}
 		chunks := apicompat.ResponsesEventToChatChunks(&event, state)
 		deferProgress := retryStage != nil && !clientOutputStarted && openAIStreamDefersProgressForRetry(payload, event.Type)

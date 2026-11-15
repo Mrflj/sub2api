@@ -54,7 +54,8 @@ func TestOpenAIStreamTransportErrorEventsRetryConfiguredAccount(t *testing.T) {
 					var failover *UpstreamFailoverError
 					if output == "text" {
 						require.Error(t, err)
-						require.NotErrorAs(t, err, &failover)
+						require.ErrorAs(t, err, &failover)
+						require.True(t, failover.RetryAfterOutput)
 						require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
 						require.NotContains(t, rec.Body.String(), "response.completed")
 						return

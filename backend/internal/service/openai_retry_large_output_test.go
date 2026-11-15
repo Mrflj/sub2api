@@ -56,8 +56,9 @@ func TestOpenAIConfiguredRetryLargeOutput(t *testing.T) {
 				if !success {
 					var failover *UpstreamFailoverError
 					require.Error(t, err)
-					require.NotErrorAs(t, err, &failover)
-					require.Contains(t, rec.Body.String(), payload, "large delivered output must not be discarded or replayed")
+					require.ErrorAs(t, err, &failover)
+					require.True(t, failover.RetryAfterOutput)
+					require.Contains(t, rec.Body.String(), payload, "a retry cannot withdraw previously delivered output")
 					return
 				}
 				require.NoError(t, err)

@@ -389,7 +389,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
-					if failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -400,6 +400,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							sameAccountRetryCount[account.ID]++
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai_chat_completions.pool_mode_same_account_retry",
+								zap.Bool("retry_after_output", failoverErr.RetryAfterOutput),
 								zap.Int64("account_id", account.ID),
 								zap.Int("upstream_status", failoverErr.StatusCode),
 								zap.Int("retry_limit", retryLimit),
@@ -410,6 +411,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 							case <-c.Request.Context().Done():
 								return
 							case <-time.After(retryDelay):
+							}
+							if failoverErr.RetryAfterOutput {
+								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue
 						}

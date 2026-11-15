@@ -70,7 +70,8 @@ func TestOpenAIConfiguredStreamRetryReleasesProgressOnlyOnSuccess(t *testing.T) 
 					} else {
 						var failover *UpstreamFailoverError
 						require.Error(t, err)
-						require.NotErrorAs(t, err, &failover, "delivered content must never be replayed")
+						require.ErrorAs(t, err, &failover)
+						require.True(t, failover.RetryAfterOutput)
 						require.True(t, c.Writer.Written())
 						if kind != "reasoning" || path != "chat" {
 							require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[kind])

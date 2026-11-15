@@ -726,6 +726,7 @@ type UpstreamFailoverError struct {
 	RequestScopedTransient   bool          // 故障因素与账号无关（如上游按客户端身份/模型容量降载）：可同账号重试，但不得据此对账号做临时封禁
 	SafeToFailoverAfterWrite bool          // 仅写出 SSE 注释等非语义字节时，仍可在同一客户端流中切换账号
 	ConfiguredStreamRetry    bool          // A private pre-output failure uses the account's configured 502 retry policy.
+	RetryAfterOutput         bool          // Configured pool retry after partial output; never rotate accounts.
 	// HeaderTimeoutSubmitted marks a failover caused by an OpenAI response-header
 	// timeout after the request was written. The upstream may have billed the
 	// attempt; the successful usage record adds one retry surcharge unit.

@@ -2961,6 +2961,42 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
+	if accountID := OpenAIStreamRetryAccountID(ctx); accountID > 0 {
+		if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		// Reuse the normal bound-account checks and concurrency acquisition, but
+		// never escape to another account after downstream content was delivered.
+		retryScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
+		retryObservation := priorityObservationFromContext(ctx, requestedModel)
+		effort, effortScoped := observationEffort(ctx)
+		retrySession := sessionHash
+		if retrySession == "" {
+			retrySession = "stream-output-retry"
+		}
+		selection, _, err := retryScheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
+			ObservationEffort: effort, ObservationEffortScoped: effortScoped,
+			GroupID: groupID, Platform: platform, SessionHash: retrySession,
+			StickyAccountID: accountID, PreserveStickyBinding: true, DisableStickyEscape: true, StrictSessionAffinity: true,
+			PreviousResponseID: previousResponseID, PreviousResponseCanMove: false,
+			UseUpstreamTokenCost: useUpstreamTokenCost, HistoryModel: retryObservation.model, InboundEndpoint: retryObservation.endpoint,
+			RequestedModel: requestedModel, RequiredTransport: requiredTransport,
+			RequiredCapability: requiredCapability, RequiredImageCapability: requiredImageCapability,
+			RequireCompact: requireCompact, ExcludedIDs: excludedIDs,
+			RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
+		})
+		if err != nil {
+			return nil, decision, err
+		}
+		if selection == nil || selection.Account == nil {
+			return nil, decision, ErrNoAvailableAccounts
+		}
+		decision.Layer = openAIAccountScheduleLayerSessionSticky
+		decision.StickySessionHit = true
+		decision.SelectedAccountID = accountID
+		decision.SelectedAccountType = selection.Account.Type
+		return selection, decision, nil
+	}
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {

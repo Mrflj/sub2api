@@ -119,7 +119,7 @@ func TestOpenAIConfiguredStreamRetryDoesNotBufferNormalOutput(t *testing.T) {
 	}
 }
 
-func TestOpenAIConfiguredStreamRetryDoesNotReplayLateFailure(t *testing.T) {
+func TestOpenAIConfiguredStreamRetryReplaysLateFailure(t *testing.T) {
 	for _, streamPath := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, output := range []string{"text", "reasoning_then_text", "tool_then_text", "web_search_then_text"} {
 			for _, status := range []int{http.StatusBadGateway, http.StatusTooManyRequests} {
@@ -141,7 +141,11 @@ func TestOpenAIConfiguredStreamRetryDoesNotReplayLateFailure(t *testing.T) {
 					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, streamPath)
 					var failover *UpstreamFailoverError
 					require.Error(t, err)
-					require.NotErrorAs(t, err, &failover, "delivered content cannot be withdrawn and replaced with another attempt")
+					require.ErrorAs(t, err, &failover)
+					require.True(t, failover.RetryAfterOutput)
+					require.True(t, failover.RetryableOnSameAccount)
+					require.False(t, failover.ShouldRetryNextAccount())
+					require.NotContains(t, rec.Body.String(), "response.failed")
 					require.Contains(t, rec.Body.String(), "private answer")
 				})
 			}

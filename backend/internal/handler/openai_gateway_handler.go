@@ -1302,8 +1302,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
-					// openAIForwardMayFailover 已确认写出的字节不含语义输出，
-					// 但重试耗尽时仍须按已提交的 SSE 响应返回流内错误。
+					// Admitted retries may already have published partial output.
+					// Exhaustion must terminate an existing SSE response in-stream.
 					if c.Writer.Written() {
 						streamStarted = true
 					}
@@ -1315,7 +1315,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					if failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1333,6 +1333,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							sameAccountRetryCount[account.ID]++
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai.pool_mode_same_account_retry",
+								zap.Bool("retry_after_output", failoverErr.RetryAfterOutput),
 								zap.Int64("account_id", account.ID),
 								zap.Int("upstream_status", failoverErr.StatusCode),
 								zap.Int("retry_limit", retryLimit),
@@ -1343,6 +1344,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 							case <-c.Request.Context().Done():
 								return
 							case <-time.After(retryDelay):
+							}
+							if failoverErr.RetryAfterOutput {
+								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue
 						}
@@ -1985,7 +1989,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
-					if failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1996,6 +2000,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							sameAccountRetryCount[account.ID]++
 							retryDelay := sameAccountRetryDelayFor(failoverErr, sameAccountRetryCount[account.ID])
 							reqLog.Warn("openai_messages.pool_mode_same_account_retry",
+								zap.Bool("retry_after_output", failoverErr.RetryAfterOutput),
 								zap.Int64("account_id", account.ID),
 								zap.Int("upstream_status", failoverErr.StatusCode),
 								zap.Int("retry_limit", retryLimit),
@@ -2006,6 +2011,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 							case <-c.Request.Context().Done():
 								return
 							case <-time.After(retryDelay):
+							}
+							if failoverErr.RetryAfterOutput {
+								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue
 						}
@@ -4812,10 +4820,15 @@ func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failo
 	if c == nil || c.Writer == nil {
 		return false
 	}
+	if failoverErr != nil && c.Request != nil && service.OpenAIStreamRetryAccountID(c.Request.Context()) > 0 {
+		failoverErr.RetryAfterOutput = true
+		failoverErr.NextAccountAction = service.NextAccountStop
+	}
 	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
 		return true
 	}
-	return failoverErr != nil && failoverErr.SafeToFailoverAfterWrite
+	return failoverErr != nil && (failoverErr.SafeToFailoverAfterWrite ||
+		(failoverErr.RetryAfterOutput && failoverErr.RetryableOnSameAccount && !failoverErr.ShouldRetryNextAccount()))
 }
 
 func openAIRequestAllowsFailoverReplay(c *gin.Context) bool {

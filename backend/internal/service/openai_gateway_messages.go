@@ -171,24 +171,16 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		}
 		compatPromptCacheInjected = promptCacheKey != ""
 	}
-	compatReplayTrimmed := false
-	compatReplayGuardEnabled := shouldAutoInjectPromptCacheKeyForCompat(upstreamModel)
 	compatContinuationEnabled := openAICompatContinuationEnabled(account, upstreamModel)
 	previousResponseID := ""
 	if compatContinuationEnabled {
 		previousResponseID = s.getOpenAICompatSessionResponseID(ctx, c, account, promptCacheKey)
 	}
-	compatContinuationDisabled := compatContinuationEnabled &&
-		s.isOpenAICompatSessionContinuationDisabled(ctx, c, account, promptCacheKey)
 	compatTurnState := ""
-	// ChatGPT/Codex credentials rely on session_id + x-codex-turn-state; trimming to a
-	// sliding 12-message window makes the cached prefix stall at system/tools.
-	// Keep full replay there so upstream prompt caching can grow turn by turn.
-	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() && previousResponseID == "" && !compatContinuationDisabled {
-		compatReplayTrimmed = applyAnthropicCompatFullReplayGuard(&anthropicReq)
-	}
 
-	// 3. Convert Anthropic → Responses after compatibility-only replay guard.
+	// 3. Preserve the complete client history when replaying a stateless request.
+	// A fixed tail can retain valid tool pairs while discarding the user task.
+	// Only a bound previous_response_id below permits sending the latest turn.
 	anthropicReq.Model = upstreamModel
 	responsesReq, err := apicompat.AnthropicToResponsesWithOptions(&anthropicReq, apicompat.AnthropicToResponsesOptions{
 		MinOutputTokens:                configuredMinOutputTokens(s.cfg),
@@ -219,9 +211,6 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		responsesReq.PreviousResponseID = previousResponseID
 		trimAnthropicCompatResponsesInputToLatestTurn(responsesReq)
 	}
-	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() {
-		appendOpenAICompatClaudeCodeTodoGuard(responsesReq)
-	}
 
 	logFields := []zap.Field{
 		zap.Int64("account_id", account.ID),
@@ -235,12 +224,6 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		logFields = append(logFields,
 			zap.Bool("compat_prompt_cache_key_injected", true),
 			zap.String("compat_prompt_cache_key_sha256", hashSensitiveValueForLog(promptCacheKey)),
-		)
-	}
-	if compatReplayTrimmed {
-		logFields = append(logFields,
-			zap.Bool("compat_full_replay_trimmed", true),
-			zap.Int("compat_messages_after_trim", len(anthropicReq.Messages)),
 		)
 	}
 	if previousResponseID != "" {
@@ -296,9 +279,6 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 			return nil, err
 		}
 		ensureCodexOAuthInstructionsField(reqBody)
-		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
-			appendOpenAICompatClaudeCodeTodoGuardToRequestBody(reqBody)
-		}
 		if codexResult.NormalizedModel != "" {
 			upstreamModel = codexResult.NormalizedModel
 		}
@@ -1066,6 +1046,15 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
 	state := apicompat.NewResponsesEventToAnthropicState()
+	if account != nil && OpenAIStreamRetryAccountID(c.Request.Context()) == account.ID {
+		if previous, ok := c.Get(openAIMessagesOutputRetryStateKey); ok {
+			if prior, ok := previous.(*apicompat.ResponsesEventToAnthropicState); ok {
+				state.MessageStartSent = prior.MessageStartSent
+				state.ContentBlockIndex = prior.ContentBlockIndex
+				state.HasToolCall = prior.HasToolCall
+			}
+		}
+	}
 	state.Model = openAIClientResponseModel(c, originalModel)
 	var usage OpenAIUsage
 	responseID := ""
@@ -1212,9 +1201,26 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					return true
 				}
 				message := extractOpenAISSEErrorMessage(payloadBytes)
-				// Once Anthropic output has started, switching accounts would splice
-				// two model streams together. Surface a proper Anthropic error event
-				// instead of returning a failover error that the handler cannot retry.
+				if clientOutputStarted {
+					if retry := s.openAIStreamRetryAfterOutputError(c, account, false, requestID, payloadBytes, message, upstreamModel, resp.Header, clientDisconnected); retry != nil {
+						if state.ContentBlockOpen {
+							index := state.ContentBlockIndex
+							sse, _ := apicompat.ResponsesAnthropicEventToSSE(apicompat.AnthropicStreamEvent{Type: "content_block_stop", Index: &index})
+							if _, err := fmt.Fprint(c.Writer, sse); err != nil {
+								clientDisconnected = true
+								streamNonFailoverErr = err
+								return true
+							}
+							c.Writer.Flush()
+							state.ContentBlockOpen = false
+							state.ContentBlockIndex++
+						}
+						c.Set(openAIMessagesOutputRetryStateKey, state)
+						streamFailoverErr = retry
+						return true
+					}
+				}
+				// Unconfigured streams retain the existing error delivery boundary.
 				shouldFailover := openAIStreamFailedEventShouldFailover(payloadBytes, message)
 				if isBareErrorEvent {
 					shouldFailover = openAIStreamErrorEventShouldFailover(payloadBytes, message)

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,7 +13,7 @@ import (
 )
 
 // Configured retries keep pre-answer progress private. Answer content streams
-// immediately; once published, it must never be replaced by another attempt.
+// immediately; configured terminal failures may retry even after partial output.
 func openAIStreamConfiguredRetryEnabled(account *Account) bool {
 	if account == nil || account.Platform != PlatformOpenAI ||
 		!account.IsPoolMode() || account.GetPoolModeRetryCount() == 0 {
@@ -67,6 +68,48 @@ func openAIStreamDefersProgressForRetry(data, eventType string) bool {
 // output or schedule a replay after the downstream request has been canceled.
 func openAIStreamClientCanceled(c *gin.Context) bool {
 	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
+}
+
+type openAIStreamRetryAccountKey struct{}
+
+const (
+	openAIMessagesOutputRetryStateKey = "openai_messages_output_retry_state"
+	openAIChatOutputRetryStateKey     = "openai_chat_output_retry_state"
+)
+
+// WithOpenAIStreamRetryAccount pins retries after partial output to their owner.
+// Previously delivered content cannot be withdrawn or moved to another account.
+func WithOpenAIStreamRetryAccount(ctx context.Context, accountID int64) context.Context {
+	return context.WithValue(ctx, openAIStreamRetryAccountKey{}, accountID)
+}
+
+func OpenAIStreamRetryAccountID(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	id, _ := ctx.Value(openAIStreamRetryAccountKey{}).(int64)
+	return id
+}
+
+func openAIStreamAllowsRetryAfterOutput(c *gin.Context, account *Account, payload []byte, message string, disconnected bool) bool {
+	if disconnected || c == nil || c.Request == nil || c.Request.Context().Err() != nil ||
+		OpenAIImageGenerationIntentFromContext(c.Request.Context()) ||
+		!openAIStreamConfiguredRetryEnabled(account) || account.Type != AccountTypeAPIKey || IsResponseCommitted(c) ||
+		!account.IsPoolModeRetryableStatus(openAIStreamFailedEventSemanticStatus(payload, message)) {
+		return false
+	}
+	return true
+}
+
+func (s *OpenAIGatewayService) openAIStreamRetryAfterOutputError(c *gin.Context, account *Account, passthrough bool, requestID string, payload []byte, message, model string, headers http.Header, disconnected bool) *UpstreamFailoverError {
+	if !openAIStreamAllowsRetryAfterOutput(c, account, payload, message, disconnected) {
+		return nil
+	}
+	err := s.newOpenAIStreamFailoverErrorWithModel(c, account, passthrough, requestID, payload, message, model, headers)
+	err.StatusCode = openAIStreamFailedEventSemanticStatus(payload, message)
+	err.RetryAfterOutput = true
+	err.NextAccountAction = NextAccountStop
+	return err
 }
 
 func (s *OpenAIGatewayService) openAIStreamRetryLimits() (int, int64) {
