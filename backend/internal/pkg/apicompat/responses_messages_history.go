@@ -198,7 +198,29 @@ func restoreResponsesHistory(blocks []AnthropicContentBlock, scope string) ([]Re
 	// State from another upstream account/model is opaque foreign state. Keep
 	// the visible conversation but never send its ciphertext to that account.
 	if !validResponsesHistoryScope(scope) || state.Scope != scope {
-		return nil, false, nil
+		// Recognize state by provenance, not by a ciphertext prefix. A provider
+		// is free to change its encryption format. Never forward a foreign
+		// account's captured signature through the legacy fallback converter.
+		signatures := map[string]bool{}
+		for _, raw := range state.Output {
+			var item ResponsesOutput
+			if json.Unmarshal(raw, &item) == nil && item.Type == "reasoning" && item.EncryptedContent != "" {
+				signatures[item.EncryptedContent] = true
+			}
+		}
+		visible := make([]AnthropicContentBlock, 0, len(blocks))
+		for _, block := range blocks {
+			if block.Type == ResponsesHistoryBlockType || block.Type == "thinking" && signatures[block.Signature] {
+				continue
+			}
+			visible = append(visible, block)
+		}
+		content, err := json.Marshal(visible)
+		if err != nil {
+			return nil, false, err
+		}
+		items, err := anthropicAssistantToResponses(content)
+		return items, true, err
 	}
 	if !historyMatchesBlocks(state.Output, blocks) {
 		return nil, false, unsupportedRequestConversion("Responses history does not match the assistant message")

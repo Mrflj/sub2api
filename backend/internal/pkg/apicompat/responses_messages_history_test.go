@@ -80,6 +80,18 @@ func TestResponsesHistoryDoesNotAlterLegacyOrForeignProviderHistory(t *testing.T
 	}
 }
 
+func TestResponsesHistoryForeignCiphertextIsolationDoesNotDependOnPrefix(t *testing.T) {
+	original := historyFixture(t)
+	raw := strings.ReplaceAll(string(original.Output[0].rawOutput), "gAAAA_fixture", "future-provider-ciphertext")
+	require.NoError(t, json.Unmarshal([]byte(raw), &original.Output[0]))
+	converted := ResponsesToAnthropic(original, "claude-alias")
+	require.True(t, AttachResponsesHistory(converted, original, historyTestScope))
+	replay, err := historyReplay(t, converted.Content, strings.Repeat("b", 64))
+	require.NoError(t, err)
+	require.NotContains(t, string(replay.Input), "future-provider-ciphertext")
+	require.Contains(t, string(replay.Input), "todo_write")
+}
+
 func TestResponsesHistoryRejectsChangedOrPrivilegedReplay(t *testing.T) {
 	original := historyFixture(t)
 	converted := ResponsesToAnthropic(original, "claude-alias")
