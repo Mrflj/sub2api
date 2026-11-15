@@ -28,6 +28,7 @@ func AnthropicToResponsesWithMinOutputTokens(req *AnthropicRequest, minOutputTok
 type AnthropicToResponsesOptions struct {
 	MinOutputTokens                int
 	DeferReasoningEffortValidation bool
+	ResponsesHistoryScope          string
 }
 
 func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToResponsesOptions) (*ResponsesRequest, error) {
@@ -45,7 +46,7 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 			return nil, err
 		}
 	}
-	input, err := convertAnthropicToResponsesInput(req.System, req.Messages)
+	input, err := convertAnthropicToResponsesInputWithHistory(req.System, req.Messages, options.ResponsesHistoryScope)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +170,10 @@ func anthropicParallelToolCalls(raw json.RawMessage) bool {
 // convertAnthropicToResponsesInput builds the Responses API input items array
 // from the Anthropic system field and message list.
 func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMessage) ([]ResponsesInputItem, error) {
+	return convertAnthropicToResponsesInputWithHistory(system, msgs, "")
+}
+
+func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 
 	// System prompt → developer role input item. ChatGPT Codex SSE behaves like
@@ -190,6 +195,19 @@ func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMe
 	}
 
 	for _, m := range msgs {
+		if m.Role == "assistant" {
+			var blocks []AnthropicContentBlock
+			if json.Unmarshal(m.Content, &blocks) == nil {
+				items, restored, err := restoreResponsesHistory(blocks, scope)
+				if err != nil {
+					return nil, err
+				}
+				if restored {
+					out = append(out, items...)
+					continue
+				}
+			}
+		}
 		items, err := anthropicMsgToResponsesItems(m)
 		if err != nil {
 			return nil, err

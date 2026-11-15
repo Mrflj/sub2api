@@ -179,8 +179,10 @@ type responsesTextPart struct {
 // ResponsesEventToAnthropicState tracks state for converting a sequence of
 // Responses SSE events directly into Anthropic SSE events.
 type ResponsesEventToAnthropicState struct {
-	MessageStartSent bool
-	MessageStopSent  bool
+	ResponsesHistoryScope string
+	history               *responsesHistoryStream
+	MessageStartSent      bool
+	MessageStopSent       bool
 
 	ContentBlockIndex   int
 	ContentBlockOpen    bool
@@ -234,15 +236,16 @@ func ResponsesEventToAnthropicEvents(
 	if state.MessageStopSent {
 		return nil
 	}
+	state.captureResponsesHistory(evt)
 	if state.toolStream == nil && (isResponsesAnthropicToolAdded(evt) ||
 		(evt.Type == "response.output_item.done" && isResponsesAnthropicToolItem(evt.Item)) ||
 		responsesAnthropicTerminalHasTools(evt)) {
 		state.toolStream = newResponsesAnthropicToolStream()
 	}
 	if state.toolStream != nil {
-		return state.toolStream.convert(evt, state)
+		return state.withResponsesHistory(evt, state.toolStream.convert(evt, state))
 	}
-	return resToAnthConvertEvent(evt, state)
+	return state.withResponsesHistory(evt, resToAnthConvertEvent(evt, state))
 }
 
 func resToAnthConvertEvent(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {

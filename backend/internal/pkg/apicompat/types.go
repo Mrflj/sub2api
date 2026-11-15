@@ -292,6 +292,27 @@ type ResponsesInputItem struct {
 	// type=function_call_output
 	Output    string `json:"output,omitempty"`
 	outputRaw json.RawMessage
+	// Keep replay-only fields (phase, summary, action, namespace, etc.) when
+	// service continuation trimming decodes and re-encodes the input array.
+	extraFields map[string]json.RawMessage
+}
+
+func (i ResponsesInputItem) MarshalJSON() ([]byte, error) {
+	type alias ResponsesInputItem
+	data, err := json.Marshal(alias(i))
+	if err != nil || len(i.extraFields) == 0 {
+		return data, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range i.extraFields {
+		if _, exists := fields[key]; !exists {
+			fields[key] = value
+		}
+	}
+	return json.Marshal(fields)
 }
 
 func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
@@ -305,6 +326,16 @@ func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 	wire.alias = (*alias)(i)
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, key := range []string{"type", "role", "content", "encrypted_content", "call_id", "name", "arguments", "id", "output"} {
+		delete(fields, key)
+	}
+	if len(fields) != 0 {
+		i.extraFields = fields
 	}
 
 	output := bytes.TrimSpace(wire.Output)
@@ -435,6 +466,9 @@ type ResponsesOutput struct {
 
 	// type=web_search_call
 	Action *WebSearchAction `json:"action,omitempty"`
+	// Exact upstream output is used only by the negotiated Messages history
+	// extension; it is never interpreted as a prompt or a client tool call.
+	rawOutput json.RawMessage
 }
 
 // MarshalJSON 处理 tool_search_call 项的线上形态（复用 CallID/Arguments 字段）：
@@ -491,6 +525,7 @@ func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		*o = ResponsesOutput(decoded)
+		o.rawOutput = append(json.RawMessage(nil), data...)
 		return nil
 	}
 
@@ -510,6 +545,7 @@ func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*o = ResponsesOutput(decoded)
+	o.rawOutput = append(json.RawMessage(nil), data...)
 	if !hasArguments || string(arguments) == "null" {
 		return nil
 	}
@@ -525,8 +561,15 @@ func (o *ResponsesOutput) UnmarshalJSON(data []byte) error {
 
 // WebSearchAction describes the search action in a web_search_call output item.
 type WebSearchAction struct {
-	Type  string `json:"type,omitempty"`  // "search"
-	Query string `json:"query,omitempty"` // primary search query
+	Type    string            `json:"type,omitempty"`  // "search"
+	Query   string            `json:"query,omitempty"` // primary search query
+	Sources []WebSearchSource `json:"sources,omitempty"`
+}
+
+type WebSearchSource struct {
+	Type  string `json:"type,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Title string `json:"title,omitempty"`
 }
 
 // ResponsesSummary is a summary text block inside a reasoning output.

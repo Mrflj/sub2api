@@ -185,6 +185,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 	responsesReq, err := apicompat.AnthropicToResponsesWithOptions(&anthropicReq, apicompat.AnthropicToResponsesOptions{
 		MinOutputTokens:                configuredMinOutputTokens(s.cfg),
 		DeferReasoningEffortValidation: true,
+		ResponsesHistoryScope:          openAIMessagesResponseHistoryScope(c, account, billingModel),
 	})
 	if err != nil {
 		if apicompat.IsUnsupportedRequestConversion(err) {
@@ -204,6 +205,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 	}
 
 	responsesReq.Model = upstreamModel
+	if openAIMessagesResponseHistoryScope(c, account, billingModel) != "" && account.Platform == PlatformOpenAI {
+		responsesReq.Include = append(responsesReq.Include, "web_search_call.action.sources")
+	}
 	if responsesReq.Reasoning != nil {
 		responsesReq.Reasoning.Effort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, responsesReq.Reasoning.Effort)
 	}
@@ -715,6 +719,10 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	acc.SupplementResponseOutput(finalResponse)
 
 	anthropicResp := apicompat.ResponsesToAnthropic(finalResponse, openAIClientResponseModel(c, originalModel))
+	if scope := openAIMessagesResponseHistoryScope(c, account, billingModel); scope != "" {
+		apicompat.AttachResponsesHistory(anthropicResp, finalResponse, scope)
+		c.Header(apicompat.ResponsesHistoryHeader, "v1")
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
@@ -1046,6 +1054,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
 
 	state := apicompat.NewResponsesEventToAnthropicState()
+	state.ResponsesHistoryScope = openAIMessagesResponseHistoryScope(c, account, billingModel)
+	if state.ResponsesHistoryScope != "" {
+		c.Header(apicompat.ResponsesHistoryHeader, "v1")
+	}
 	if account != nil && OpenAIStreamRetryAccountID(c.Request.Context()) == account.ID {
 		if previous, ok := c.Get(openAIMessagesOutputRetryStateKey); ok {
 			if prior, ok := previous.(*apicompat.ResponsesEventToAnthropicState); ok {

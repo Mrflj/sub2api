@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/groupprompt"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -63,6 +64,11 @@ func TestForwardAsAnthropic_PreservesTaskAndRepeatedToolHistory(t *testing.T) {
 				},
 			})
 			require.NoError(t, err)
+			groupPolicy := groupprompt.Config{Enabled: true, Content: "GROUP_SYSTEM_MARKER", ModelPrompts: map[string]string{
+				tc.model: "WRONG_UPSTREAM_PROMPT",
+			}}
+			body, err = groupprompt.Prepend(body, "messages", groupPolicy.Prompt("claude-sonnet-4-5"))
+			require.NoError(t, err)
 			upstream := &httpUpstreamRecorder{resp: openAICompatSSECompletedResponse("resp_history", tc.model)}
 			svc := &OpenAIGatewayService{httpUpstream: upstream, cfg: &config.Config{}}
 			account := &Account{ID: int64(92300 + index), Platform: PlatformOpenAI, Type: tc.accountType, Concurrency: 1,
@@ -85,6 +91,8 @@ func TestForwardAsAnthropic_PreservesTaskAndRepeatedToolHistory(t *testing.T) {
 			sent := upstream.lastBody
 			require.Contains(t, string(sent), "ORIGINAL_TASK_MARKER")
 			require.Contains(t, string(sent), "CLIENT_SYSTEM_MARKER")
+			require.Equal(t, "GROUP_SYSTEM_MARKER\n\nCLIENT_SYSTEM_MARKER", gjson.GetBytes(sent, "input.0.content.0.text").String())
+			require.NotContains(t, string(sent), "WRONG_UPSTREAM_PROMPT")
 			require.NotContains(t, string(sent), "sub2api-claude-code-todo-guard")
 			require.False(t, gjson.GetBytes(sent, "previous_response_id").Exists())
 			require.Equal(t, int64(32), gjson.GetBytes(sent, "input.#").Int())

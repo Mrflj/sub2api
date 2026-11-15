@@ -78,8 +78,9 @@ func TestGroupPromptMappedMessagesContinuationKeepsCurrentSystem(t *testing.T) {
 				if turn == 1 {
 					require.Equal(t, "resp_first", gjson.GetBytes(upstream.lastBody, "previous_response_id").String())
 					require.NotContains(t, systemTexts, "PROMPT-A\n\nCLIENT-SYSTEM")
-					require.Equal(t, int64(3), gjson.GetBytes(upstream.lastBody, "input.#").Int()) // Guard, current system, latest user.
-					require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.2.content.0.text").String())
+					require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "input.#").Int()) // Current group/client system and latest user.
+					require.Equal(t, "second", gjson.GetBytes(upstream.lastBody, "input.1.content.0.text").String())
+					require.NotContains(t, string(upstream.lastBody), "sub2api-claude-code-todo-guard")
 				}
 			}
 		})

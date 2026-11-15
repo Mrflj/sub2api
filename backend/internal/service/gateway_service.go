@@ -418,6 +418,8 @@ var ErrClaudeCodeOnly = errors.New("this group only allows Claude Code clients")
 
 // allowedHeaders 白名单headers（参考CRS项目）
 var allowedHeaders = map[string]bool{
+	// Propagate explicit history negotiation across Messages relay chains.
+	"x-sub2api-responses-history":               true,
 	"accept":                                    true,
 	"x-stainless-retry-count":                   true,
 	"x-stainless-timeout":                       true,
