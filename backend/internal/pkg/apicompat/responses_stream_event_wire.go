@@ -174,6 +174,9 @@ func responsesItemWire(item *ResponsesOutput) map[string]any {
 			role = "assistant"
 		}
 		m["role"] = role
+		if item.Phase != "" {
+			m["phase"] = item.Phase
+		}
 		m["content"] = messageContentWire(item.Content)
 	case "reasoning":
 		m["summary"] = reasoningSummaryWire(item.Summary)

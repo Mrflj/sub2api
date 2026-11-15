@@ -63,6 +63,9 @@ type AnthropicContentBlock struct {
 
 	// type=text
 	Text string `json:"text,omitempty"`
+	// Phase is a negotiated bridge field, emitted only for clients that request
+	// Responses history support. It is not part of native Anthropic Messages.
+	Phase string `json:"phase,omitempty"`
 
 	// type=thinking
 	Thinking string `json:"thinking,omitempty"`
@@ -444,6 +447,7 @@ type ResponsesOutput struct {
 	// type=message
 	ID      string                 `json:"id,omitempty"`
 	Role    string                 `json:"role,omitempty"`
+	Phase   string                 `json:"phase,omitempty"`
 	Content []ResponsesContentPart `json:"content,omitempty"`
 	Status  string                 `json:"status,omitempty"`
 

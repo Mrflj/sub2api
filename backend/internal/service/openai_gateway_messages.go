@@ -720,6 +720,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 
 	anthropicResp := apicompat.ResponsesToAnthropic(finalResponse, openAIClientResponseModel(c, originalModel))
 	if scope := openAIMessagesResponseHistoryScope(c, account, billingModel); scope != "" {
+		anthropicResp = apicompat.ResponsesToAnthropicWithPhase(finalResponse, openAIClientResponseModel(c, originalModel))
 		apicompat.AttachResponsesHistory(anthropicResp, finalResponse, scope)
 		c.Header(apicompat.ResponsesHistoryHeader, "v1")
 	}
@@ -1077,6 +1078,24 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	firstClientOutputEvent := ""
 	firstClientOutputItemType := ""
 	configuredStreamRetry := openAIStreamConfiguredRetryEnabled(account)
+	defer func() {
+		if state.ResponsesHistoryScope == "" {
+			return
+		}
+		diagnostic := state.ResponsesHistoryResult()
+		fields := []zap.Field{
+			zap.String("request_id", requestID),
+			zap.String("status", diagnostic.Status),
+			zap.Int("output_items", diagnostic.OutputItems),
+			zap.Int("hosted_searches", diagnostic.HostedSearches),
+			zap.Int("hosted_sources", diagnostic.HostedSources),
+		}
+		if state.MessageStopSent && !clientDisconnected && diagnostic.Status != "attached" {
+			logger.L().Warn("openai messages stream: responses history not attached", fields...)
+		} else {
+			logger.L().Debug("openai messages stream: responses history", fields...)
+		}
+	}()
 	preamble := s.newOpenAIStreamOutputStage(account)
 	defer func() {
 		if err := preamble.Close(); err != nil {

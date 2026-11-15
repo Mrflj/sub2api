@@ -15,6 +15,17 @@ import (
 // Anthropic Messages response. Reasoning output items are mapped to thinking
 // blocks; function_call items become tool_use blocks.
 func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicResponse {
+	return responsesToAnthropic(resp, model, false)
+}
+
+// ResponsesToAnthropicWithPhase preserves assistant message phases for the
+// explicitly negotiated local bridge. Ordinary Anthropic clients keep their
+// existing wire schema through ResponsesToAnthropic.
+func ResponsesToAnthropicWithPhase(resp *ResponsesResponse, model string) *AnthropicResponse {
+	return responsesToAnthropic(resp, model, true)
+}
+
+func responsesToAnthropic(resp *ResponsesResponse, model string, preservePhase bool) *AnthropicResponse {
 	out := &AnthropicResponse{
 		ID:    resp.ID,
 		Type:  "message",
@@ -39,13 +50,23 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 				})
 			}
 		case "message":
+			phase := ""
+			if preservePhase {
+				phase = responsesAssistantPhase(item.Phase)
+			}
+			hasText := false
 			for _, part := range item.Content {
 				if part.Type == "output_text" && part.Text != "" {
+					hasText = true
 					blocks = append(blocks, AnthropicContentBlock{
-						Type: "text",
-						Text: part.Text,
+						Type:  "text",
+						Text:  part.Text,
+						Phase: phase,
 					})
 				}
+			}
+			if !hasText && phase != "" {
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Phase: phase})
 			}
 		case "function_call":
 			blocks = append(blocks, AnthropicContentBlock{
@@ -206,7 +227,10 @@ type ResponsesEventToAnthropicState struct {
 	// content block; closeCurrentBlock must not reset it.
 	textByPart map[responsesTextPart]*strings.Builder
 	// textDelivered records whether any assistant text reached the client.
-	textDelivered bool
+	textDelivered   bool
+	messagePhases   map[int]string
+	phaseStarted    map[int]bool
+	textOutputIndex int
 
 	InputTokens              int
 	OutputTokens             int
@@ -237,6 +261,7 @@ func ResponsesEventToAnthropicEvents(
 		return nil
 	}
 	state.captureResponsesHistory(evt)
+	state.captureResponsesMessagePhase(evt)
 	if state.toolStream == nil && (isResponsesAnthropicToolAdded(evt) ||
 		(evt.Type == "response.output_item.done" && isResponsesAnthropicToolItem(evt.Item)) ||
 		responsesAnthropicTerminalHasTools(evt)) {
@@ -426,7 +451,7 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 		return events
 
 	case "message":
-		return nil
+		return resToAnthStartMessagePhase(evt.OutputIndex, state)
 	}
 
 	return nil
@@ -450,19 +475,26 @@ func resToAnthEmitText(text string, part responsesTextPart, state *ResponsesEven
 
 	var events []AnthropicStreamEvent
 
-	if !state.ContentBlockOpen || state.CurrentBlockType != "text" {
+	if !state.ContentBlockOpen || state.CurrentBlockType != "text" ||
+		validResponsesHistoryScope(state.ResponsesHistoryScope) && state.textOutputIndex != part.OutputIndex {
 		events = append(events, closeCurrentBlock(state)...)
 
 		idx := state.ContentBlockIndex
 		state.ContentBlockOpen = true
 		state.CurrentBlockType = "text"
+		state.textOutputIndex = part.OutputIndex
+		phase := state.responsesMessagePhase(part.OutputIndex)
+		if phase != "" {
+			state.phaseStarted[part.OutputIndex] = true
+		}
 
 		events = append(events, AnthropicStreamEvent{
 			Type:  "content_block_start",
 			Index: &idx,
 			ContentBlock: &AnthropicContentBlock{
-				Type: "text",
-				Text: "",
+				Type:  "text",
+				Text:  "",
+				Phase: phase,
 			},
 		})
 	}
@@ -739,6 +771,10 @@ func resToAnthRecoverTerminalText(evt *ResponsesStreamEvent, state *ResponsesEve
 		if item.Type != "message" {
 			continue
 		}
+		// No text has been emitted on this fallback path, so the terminal
+		// message order can safely supply its explicit phase before recovery.
+		state.captureResponsesMessagePhase(&ResponsesStreamEvent{OutputIndex: outputIndex, Item: &item})
+		events = append(events, resToAnthStartMessagePhase(outputIndex, state)...)
 		for contentIndex, content := range item.Content {
 			if content.Type != "output_text" {
 				continue
