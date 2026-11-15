@@ -405,9 +405,22 @@ func TestPluginSSEPoolStreamsOutputWithoutGrantingEarlyMetadata(t *testing.T) {
 						collector.Finish(http.StatusOK, false)
 						var snapshot requesttiming.Snapshot
 						collector.WhenFinished(func(s requesttiming.Snapshot) { snapshot = s })
-						require.Equal(t, 200*time.Millisecond, w.first, "pool accounts release real output without granting plugin metadata delivery at 100ms")
-						require.Equal(t, float64(200), snapshot.Events["first_sse_event_flush"])
-						require.Contains(t, w.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])
+						if output == "text" {
+							require.Equal(t, 200*time.Millisecond, w.first, "answer output must stream immediately")
+							require.Equal(t, float64(200), snapshot.Events["first_sse_event_flush"])
+							require.Contains(t, w.Body.String(), "private answer")
+						} else if scenario == "success" {
+							require.Equal(t, 300*time.Millisecond, w.first, "tool-only success releases progress at its terminal")
+							require.Contains(t, w.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup"}[output])
+						} else {
+							var failover *UpstreamFailoverError
+							require.ErrorAs(t, err, &failover)
+							require.True(t, failover.RetryableOnSameAccount)
+							require.Empty(t, w.Body.String())
+							require.False(t, c.Writer.Written())
+							require.NotContains(t, snapshot.Events, "first_sse_event_flush")
+							return
+						}
 						if scenario == "success" {
 							require.NoError(t, err)
 							require.Contains(t, w.Body.String(), "response.completed")

@@ -509,7 +509,7 @@ func TestOpenAIMessagesConfiguredStatusRetriesSameAccount(t *testing.T) {
 		{name: "502_not_configured", retries: 10, retryStatus: http.StatusServiceUnavailable, wantCalls: 1},
 		{name: "delivered_real_output_no_replay", retries: 2, retryStatus: http.StatusBadGateway, wantCalls: 1, realOutput: true},
 		{name: "real_output_retry_disabled", retries: 0, retryStatus: http.StatusBadGateway, wantCalls: 1, realOutput: true},
-		{name: "delivered_reasoning_tool_no_replay", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 1, partialPrelude: true},
+		{name: "private_reasoning_tool_recovers", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, partialPrelude: true},
 		{name: "recovers_after_two", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2},
 		{name: "opaque_preamble_recovers_after_two", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, opaquePrelude: true},
 	} {
@@ -530,6 +530,7 @@ type messagesRetryCase struct {
 	queueHeartbeat, streamHeartbeat, realOutput bool
 	opaquePrelude                               bool
 	partialPrelude                              bool
+	webSearchPrelude                            bool
 	noReplay                                    bool
 }
 
@@ -632,6 +633,11 @@ data: {"response":{"created_at":1793894912,"error":{"code":"bps_stream_error","m
 			"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_failed\",\"call_id\":\"call_failed\",\"name\":\"lookup\",\"arguments\":\"{}\"}}\n\n"
 		upstream.body = strings.Replace(upstream.body, "event: response.failed", prelude+"event: response.failed", 1)
 	}
+	if test.webSearchPrelude {
+		prelude := "data: " + `{"type":"response.output_item.added","output_index":0,"item":{"id":"ws_failed","type":"web_search_call","status":"in_progress"}}` + "\n\n" +
+			"data: " + `{"type":"response.output_item.done","output_index":0,"item":{"id":"ws_failed","type":"web_search_call","status":"completed","action":{"type":"search","query":"retry fixture"}}}` + "\n\n"
+		upstream.body = strings.Replace(upstream.body, "event: response.failed", prelude+"event: response.failed", 1)
+	}
 	if test.realOutput {
 		upstream.body = strings.Replace(upstream.body, "event: response.failed", "data: "+`{"type":"response.output_text.delta","delta":"partial"}`+"\n\nevent: response.failed", 1)
 	}
@@ -705,7 +711,7 @@ data: {"type":"response.completed","response":{"id":"resp_messages_success","sta
 		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-6-sol","input":"hello","stream":true,"prompt_cache_key":"stable-size-limit-cache"}`))
 	}
 	c.Request.Header.Set("Content-Type", "application/json")
-	if test.lineLimit || test.streamReadErr != nil {
+	if test.lineLimit || test.streamReadErr != nil || test.partialPrelude || test.webSearchPrelude {
 		c.Request.Header.Set("session_id", "stable-size-limit-session")
 	}
 	c.Request = c.Request.WithContext(ctx)
@@ -732,14 +738,15 @@ data: {"type":"response.completed","response":{"id":"resp_messages_success","sta
 	} else {
 		h.Messages(c)
 	}
-	deliveredOutput := test.realOutput || test.partialPrelude
-	if test.partialPrelude {
+	deliveredOutput := test.realOutput || (test.partialPrelude && test.retries == 0)
+	if test.partialPrelude && deliveredOutput {
 		require.Contains(t, rec.Body.String(), "failed_attempt_only")
 		require.Contains(t, rec.Body.String(), "call_failed")
 	} else {
 		require.NotContains(t, rec.Body.String(), "failed_attempt_only")
 		require.NotContains(t, rec.Body.String(), "call_failed")
 	}
+	require.NotContains(t, rec.Body.String(), "ws_failed")
 	upstream.mu.Lock()
 	calls := append([]int64(nil), upstream.accountIDs...)
 	bodies := append([][]byte(nil), upstream.requestBodies...)
@@ -749,7 +756,7 @@ data: {"type":"response.completed","response":{"id":"resp_messages_success","sta
 	for _, id := range calls {
 		require.Equal(t, accountID, id)
 	}
-	if test.lineLimit || test.http400 || test.failureCode != "" || test.streamReadErr != nil {
+	if test.lineLimit || test.http400 || test.failureCode != "" || test.streamReadErr != nil || test.partialPrelude || test.webSearchPrelude {
 		for i := 1; i < len(bodies); i++ {
 			require.Equal(t, bodies[0], bodies[i], "retries preserve request and cache key")
 			require.Equal(t, headers[0].Get("session_id"), headers[i].Get("session_id"))
@@ -852,6 +859,7 @@ func TestOpenAIChatReadFailuresRetrySameAccount(t *testing.T) {
 		{name: "truncated_recovers", retries: 10, wantCalls: 2, successAfter: 1, streamReadErr: io.EOF},
 		{name: "http2_reset_no_replay", retries: 10, wantCalls: 1, successAfter: 1, noReplay: true, streamReadErr: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer")},
 		{name: "opaque_reasoning_recovers", retries: 10, wantCalls: 2, successAfter: 1, opaquePrelude: true, streamReadErr: io.ErrUnexpectedEOF},
+		{name: "private_reasoning_tool_recovers", retries: 10, wantCalls: 3, successAfter: 2, partialPrelude: true, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "queue_heartbeat", retries: 2, wantCalls: 3, queueHeartbeat: true, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "stream_heartbeat", retries: 2, wantCalls: 3, streamHeartbeat: true, opaquePrelude: true, streamReadErr: io.ErrUnexpectedEOF},
 	} {
@@ -864,8 +872,8 @@ func TestOpenAIChatReadFailuresRetrySameAccount(t *testing.T) {
 
 func TestOpenAIChatConfiguredStatusRetriesSameAccount(t *testing.T) {
 	for _, test := range []messagesRetryCase{
-		{name: "delivered_output_after_heartbeat_no_replay", chat: true, retries: 2, retryStatus: http.StatusBadGateway, wantCalls: 1, streamHeartbeat: true, partialPrelude: true},
-		{name: "delivered_reasoning_tool_no_replay", chat: true, retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 1, partialPrelude: true},
+		{name: "private_progress_after_heartbeat_retries", chat: true, retries: 2, retryStatus: http.StatusBadGateway, wantCalls: 3, streamHeartbeat: true, partialPrelude: true},
+		{name: "private_reasoning_tool_recovers", chat: true, retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, partialPrelude: true},
 		{name: "opaque_reasoning_recovers_after_two", chat: true, retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, opaquePrelude: true},
 	} {
 		t.Run(test.name, func(t *testing.T) { runMessagesRetryCase(t, test) })
@@ -890,6 +898,30 @@ func TestOpenAIConfiguredStreamErrorsRetryBeforeOutputAndSettleOnce(t *testing.T
 			})
 		}
 	}
+}
+
+func TestOpenAIConfiguredPrivateProgressRetriesSameAccountAndSettlesOnce(t *testing.T) {
+	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
+		for _, progress := range []string{"reasoning_and_tool", "web_search"} {
+			for _, status := range []int{http.StatusBadGateway, http.StatusTooManyRequests} {
+				t.Run(fmt.Sprintf("%s/%s/%d", path, progress, status), func(t *testing.T) {
+					code := "bps_stream_error"
+					if status == http.StatusTooManyRequests {
+						code = "rate_limit_exceeded"
+					}
+					runMessagesRetryCase(t, messagesRetryCase{
+						name: path, retries: 10, retryStatus: status, wantCalls: 3, successAfter: 2,
+						failureCode: code, partialPrelude: progress == "reasoning_and_tool", webSearchPrelude: progress == "web_search",
+						chat: path == "chat", responses: path == "native" || path == "passthrough", passthrough: path == "passthrough",
+					})
+				})
+			}
+		}
+	}
+	t.Run("messages/web_search/exhausts_ten_retries", func(t *testing.T) {
+		runMessagesRetryCase(t, messagesRetryCase{retries: 10, retryStatus: http.StatusTooManyRequests, wantCalls: 11,
+			failureCode: "rate_limit_exceeded", webSearchPrelude: true})
+	})
 }
 
 func TestOpenAISizeLimitRecoverySettlesOnce(t *testing.T) {
@@ -924,7 +956,7 @@ func TestOpenAIUpstreamTimeoutRetriesSameAccount(t *testing.T) {
 		{name: "chat_ten_retries", retries: 10, wantCalls: 11},
 		{name: "chat_queue_heartbeat", retries: 2, wantCalls: 3, queueHeartbeat: true},
 		{name: "chat_stream_heartbeat", retries: 2, wantCalls: 3, streamHeartbeat: true},
-		{name: "chat_delivered_reasoning_no_replay", retries: 2, wantCalls: 1, partialPrelude: true},
+		{name: "chat_private_reasoning_retries", retries: 2, wantCalls: 3, partialPrelude: true},
 		{name: "chat_output_already_delivered", wantCalls: 1, realOutput: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

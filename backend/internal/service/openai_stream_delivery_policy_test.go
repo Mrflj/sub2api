@@ -23,6 +23,33 @@ func configuredRetryFailurePayload(status int) string {
 	return `{"code":"bps_stream_error","message":"Upstream request failed, please try again later","type":"bps_stream_error"}`
 }
 
+func TestOpenAIConfiguredStreamRetryAfterPrivateProgress(t *testing.T) {
+	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
+		for _, kind := range []string{"reasoning", "tool", "web_search"} {
+			for _, status := range []int{http.StatusBadGateway, http.StatusTooManyRequests} {
+				t.Run(fmt.Sprintf("%s/%s/%d", path, kind, status), func(t *testing.T) {
+					account := newConfiguredStreamRetryAccount()
+					account.Credentials["pool_mode_retry_status_codes"] = []any{float64(status)}
+					progress := configuredRetryOutput(kind)
+					if kind == "web_search" {
+						progress = configuredRetryWebSearchOutput()
+					}
+					body := progress + configuredRetryEvent(fmt.Sprintf(`{"type":"response.failed","sequence_number":20,"response":{"status":"failed","error":%s}}`, configuredRetryFailurePayload(status)))
+					c, rec := newOpenAIConfiguredRetryContext()
+					resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
+					var failover *UpstreamFailoverError
+					require.ErrorAs(t, err, &failover)
+					require.True(t, failover.RetryableOnSameAccount)
+					require.Equal(t, status, failover.StatusCode)
+					require.Empty(t, rec.Body.String(), "failed search, reasoning and tool attempts must stay private")
+					require.False(t, c.Writer.Written())
+				})
+			}
+		}
+	}
+}
+
 func TestOpenAIConfiguredStreamRetryClassifiesErrorsBeforeDelivery(t *testing.T) {
 	for _, streamPath := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, status := range []int{http.StatusBadGateway, http.StatusTooManyRequests} {
@@ -78,11 +105,11 @@ func TestOpenAIConfiguredStreamRetryDoesNotBufferNormalOutput(t *testing.T) {
 				account := newConfiguredStreamRetryAccount()
 				account.Credentials["pool_mode_retry_status_codes"] = []any{float64(status)}
 				tail := strings.Repeat("normal-tail", 2048)
-				body := configuredRetryOutput("text") + configuredRetryEvent(fmt.Sprintf(`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":%q}`, tail)) +
+				body := configuredRetryOutput("reasoning") + configuredRetryWebSearchOutput() + configuredRetryOutput("text") + configuredRetryEvent(fmt.Sprintf(`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":%q}`, tail)) +
 					configuredRetryEvent(`{"type":"response.completed","response":{"id":"resp_success","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":3}}}`)
 				c, rec := newOpenAIConfiguredRetryContext()
 				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
-				svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{OpenAIStreamRetryMaxBufferBytes: 1024}}}
+				svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{OpenAIStreamRetryMaxBufferBytes: 2048, StreamKeepaliveInterval: 1}}}
 				err := runConfiguredRetryStream(svc, c, resp, account, streamPath)
 				require.NoError(t, err, "normal output must not accumulate against the private preamble buffer limit")
 				require.Contains(t, rec.Body.String(), "private answer")
@@ -94,19 +121,28 @@ func TestOpenAIConfiguredStreamRetryDoesNotBufferNormalOutput(t *testing.T) {
 
 func TestOpenAIConfiguredStreamRetryDoesNotReplayLateFailure(t *testing.T) {
 	for _, streamPath := range []string{"native", "passthrough", "messages", "chat"} {
-		for _, output := range []string{"text", "reasoning", "tool"} {
+		for _, output := range []string{"text", "reasoning_then_text", "tool_then_text", "web_search_then_text"} {
 			for _, status := range []int{http.StatusBadGateway, http.StatusTooManyRequests} {
 				t.Run(fmt.Sprintf("%s/%s/%d", streamPath, output, status), func(t *testing.T) {
 					account := newConfiguredStreamRetryAccount()
 					account.Credentials["pool_mode_retry_status_codes"] = []any{float64(status)}
-					body := configuredRetryOutput(output) + configuredRetryEvent(fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","error":%s}}`, configuredRetryFailurePayload(status)))
+					body := configuredRetryOutput("text")
+					switch output {
+					case "reasoning_then_text":
+						body = configuredRetryOutput("reasoning") + body
+					case "tool_then_text":
+						body = configuredRetryOutput("tool") + body
+					case "web_search_then_text":
+						body = configuredRetryWebSearchOutput() + body
+					}
+					body += configuredRetryEvent(fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","error":%s}}`, configuredRetryFailurePayload(status)))
 					c, rec := newOpenAIConfiguredRetryContext()
 					resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, streamPath)
 					var failover *UpstreamFailoverError
 					require.Error(t, err)
 					require.NotErrorAs(t, err, &failover, "delivered content cannot be withdrawn and replaced with another attempt")
-					require.Contains(t, rec.Body.String(), map[string]string{"text": "private answer", "reasoning": "private reasoning", "tool": "lookup"}[output])
+					require.Contains(t, rec.Body.String(), "private answer")
 				})
 			}
 		}

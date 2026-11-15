@@ -865,6 +865,10 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
+			startsUpstreamOutput := startsClientOutput
+			if configuredStreamRetry && !clientOutputStarted && !forceFlushFailedEvent && openAIStreamDefersProgressForRetry(data, eventType) {
+				startsClientOutput = false
+			}
 			if startsClientOutput && !forceFlushFailedEvent && firstClientOutputEvent == "" {
 				firstClientOutputEvent = eventType
 				firstClientOutputItemType = gjson.GetBytes(dataBytes, "item.type").String()
@@ -876,6 +880,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				// A partial multiline JSON value is not structural output. Wait
 				// until its full payload is known before releasing metadata.
 				startsClientOutput = len(metricPayload) > 0 && openAIStreamDataStartsClientOutput(string(metricPayload), metricType)
+				startsUpstreamOutput = startsClientOutput
 			}
 			deliveryObservation.data(metricPayload, metricType)
 			pluginMetadataEvent.data(metricPayload, metricType)
@@ -889,14 +894,14 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			if stageFirstOutput {
 				eventStartsClientOutput = eventStartsClientOutput || startsClientOutput
-				eventStartsUpstreamProgress = eventStartsUpstreamProgress || (!forceFlushFailedEvent && startsClientOutput) || openAIStreamDataIsOpaquePreamble(data, eventType)
+				eventStartsUpstreamProgress = eventStartsUpstreamProgress || (!forceFlushFailedEvent && startsUpstreamOutput) || openAIStreamDataIsOpaquePreamble(data, eventType)
 				eventStartsTTFTOutput = eventStartsTTFTOutput || startsTTFTOutput
 				eventStartsLegacyTTFTOutput = eventStartsLegacyTTFTOutput || startsLegacyTTFTOutput
 				if startsClientOutput {
 					firstOutputScanGuard.Store(false)
 				}
 			}
-			if startsClientOutput && !forceFlushFailedEvent && !openAIStreamEventTypeIsTerminal(eventType) {
+			if startsUpstreamOutput && !forceFlushFailedEvent && !openAIStreamEventTypeIsTerminal(eventType) {
 				responsesSemanticOutputSeen = true
 			}
 			// OpenAI Responses streams that terminate with an empty
@@ -921,7 +926,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
 				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
-				if !legacyTTFTObserved && startsVisibleOutput {
+				if (!legacyTTFTObserved || (configuredStreamRetry && !clientOutputStarted)) && startsVisibleOutput && (!configuredStreamRetry || clientOutputStarted || startsClientOutput) {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。
 					shouldFlush = true
 				}

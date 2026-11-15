@@ -2459,7 +2459,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	}
 	streamInterval := s.openAIPassthroughStreamDataInterval(imageBillingModel)
 	heartbeat := func() {
-		if clientDisconnected || (clientOutputStarted && !pluginEarlyCommitted) || semanticOutputSeen || failureDelivered {
+		if clientDisconnected || (clientOutputStarted && !pluginEarlyCommitted) || (!configuredStreamRetry && semanticOutputSeen) || failureDelivered {
 			return
 		}
 		n, err := w.Write([]byte(": keepalive\n\n"))
@@ -2666,6 +2666,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if earlyPluginEvents && !forceFlushFailedEvent {
 				lineStartsClientOutput = len(metricPayload) > 0 && openAIStreamDataStartsClientOutput(string(metricPayload), metricType)
 			}
+			lineStartsUpstreamOutput := lineStartsClientOutput
+			if configuredStreamRetry && !clientOutputStarted && !forceFlushFailedEvent && openAIStreamDefersProgressForRetry(trimmedData, eventType) {
+				lineStartsClientOutput = false
+			}
 			if lineStartsClientOutput && !forceFlushFailedEvent && firstClientOutputEvent == "" {
 				firstClientOutputEvent = eventType
 				firstClientOutputItemType = gjson.GetBytes(dataBytes, "item.type").String()
@@ -2674,7 +2678,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if opaquePreamble && eventType == "response.output_item.done" {
 				completedOpaqueOutputSeen = true
 			}
-			if lineStartsClientOutput || opaquePreamble {
+			if lineStartsUpstreamOutput || opaquePreamble {
 				documentScanner.firstOutputDeadline = time.Time{}
 			}
 			if lineStartsClientOutput {
@@ -2683,7 +2687,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			if opaquePreamble {
 				budgetProgressPending = true
 			}
-			if lineStartsClientOutput && !forceFlushFailedEvent && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
+			if lineStartsUpstreamOutput && !forceFlushFailedEvent && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
 				semanticOutputSeen = true
 				budgetProgressPending = true
 			}

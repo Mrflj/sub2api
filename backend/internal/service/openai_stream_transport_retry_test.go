@@ -52,7 +52,7 @@ func TestOpenAIStreamTransportErrorEventsRetryConfiguredAccount(t *testing.T) {
 					}
 					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: cfg}, c, resp, newConfiguredStreamRetryAccount(), path)
 					var failover *UpstreamFailoverError
-					if output != "metadata" {
+					if output == "text" {
 						require.Error(t, err)
 						require.NotErrorAs(t, err, &failover)
 						require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[output])

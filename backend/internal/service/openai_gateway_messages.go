@@ -1266,7 +1266,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			firstTokenMs = &ms
 		}
 		stagePreamble := !clientOutputStarted && !isTerminalEvent &&
-			!startsOutput
+			(!startsOutput || (configuredStreamRetry && openAIStreamDefersProgressForRetry(payload, eventType)))
 		if !clientDisconnected {
 			for _, evt := range events {
 				sse, err := apicompat.ResponsesAnthropicEventToSSE(evt)
@@ -1277,8 +1277,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					)
 					continue
 				}
-				// Keep message_start and empty block events private until output or
-				// a successful terminal, so failed attempts can still be replayed.
+				// Keep metadata and configured pre-answer progress private until
+				// answer output or success, so a failed attempt can be discarded.
 				if stagePreamble {
 					if _, err := preamble.WriteString(sse); err != nil {
 						logger.L().Warn("openai messages stream: preamble staging failed", zap.Error(err), zap.String("request_id", requestID))

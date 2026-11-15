@@ -38,7 +38,7 @@ func TestOpenAIUpstreamTimeoutConfiguredRetry(t *testing.T) {
 				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
 				var failover *UpstreamFailoverError
-				if prelude != "metadata" {
+				if prelude == "text" {
 					require.Error(t, err)
 					require.NotErrorAs(t, err, &failover)
 					require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[prelude])
@@ -90,7 +90,7 @@ func TestOpenAIChatConfiguredRetryReadFailures(t *testing.T) {
 						require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
 						require.NotNil(t, result)
 						require.Contains(t, rec.Body.String(), "PROTOCOL_ERROR")
-						if output == "metadata" {
+						if output != "text" {
 							for _, staged := range []string{"private answer", "private reasoning", "lookup"} {
 								require.NotContains(t, rec.Body.String(), staged)
 							}
@@ -102,7 +102,7 @@ func TestOpenAIChatConfiguredRetryReadFailures(t *testing.T) {
 						require.NotNil(t, ops.TransportFailure)
 						return
 					}
-					if output != "metadata" {
+					if output == "text" {
 						require.Error(t, err)
 						require.NotErrorAs(t, err, &failover)
 						require.NotNil(t, result)

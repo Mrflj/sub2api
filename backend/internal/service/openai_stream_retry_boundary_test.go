@@ -153,7 +153,7 @@ func (w *configuredRetryOutputRecorder) Flush() {
 	}
 }
 
-func TestOpenAIConfiguredStreamRetryFlushesBeforeTerminal(t *testing.T) {
+func TestOpenAIConfiguredStreamRetryFlushesAnswerBeforeTerminal(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		outputKinds := []string{"text", "reasoning", "tool"}
 		if path == "native" || path == "passthrough" {
@@ -198,10 +198,103 @@ func TestOpenAIConfiguredStreamRetryFlushesBeforeTerminal(t *testing.T) {
 					resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: reader}
 					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
 					require.NoError(t, err)
-					require.True(t, <-deliveredBeforeTerminal, fmt.Sprintf("%s/%s waited for terminal instead of streaming valid output", path, kind))
+					require.Equal(t, kind == "text", <-deliveredBeforeTerminal, "only answer content commits a configured pool stream before success")
 					require.Contains(t, rec.Body.String(), needle)
 				})
 			})
 		}
 	}
+}
+
+func TestOpenAIConfiguredStreamRetryReleasesProgressAtFirstAnswer(t *testing.T) {
+	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
+		for _, kind := range []string{"reasoning", "tool", "web_search"} {
+			t.Run(path+"/"+kind, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					progress := configuredRetryOutput(kind)
+					if kind == "web_search" {
+						progress = configuredRetryWebSearchOutput()
+					}
+					rec := &configuredRetryOutputRecorder{
+						ResponseRecorder: httptest.NewRecorder(), needle: "private answer", flushed: make(chan struct{}, 1),
+					}
+					c, _ := gin.CreateTestContext(rec)
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+					reader, writer := io.Pipe()
+					defer reader.Close()
+					checks := make(chan bool, 2)
+					go func() {
+						defer writer.Close()
+						if _, err := io.WriteString(writer, progress); err != nil {
+							return
+						}
+						synctest.Wait()
+						checks <- rec.Body.Len() == 0
+						if _, err := io.WriteString(writer, configuredRetryOutput("text")); err != nil {
+							return
+						}
+						synctest.Wait()
+						select {
+						case <-rec.flushed:
+							checks <- true
+						default:
+							checks <- false
+						}
+						_, _ = io.WriteString(writer, configuredRetryEvent(messagesBPSFailure))
+					}()
+					resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: reader}
+					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
+					var failover *UpstreamFailoverError
+					require.Error(t, err)
+					require.NotErrorAs(t, err, &failover, "published answer must not be replayed")
+					require.True(t, <-checks, "progress alone must stay private")
+					require.True(t, <-checks, "the first answer must flush before the terminal arrives")
+					require.Contains(t, rec.Body.String(), "private answer")
+				})
+			})
+		}
+	}
+}
+
+func TestOpenAIConfiguredStreamRetryToolOnlyTerminalAliases(t *testing.T) {
+	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
+		for _, terminal := range []string{"response.completed", "response.done"} {
+			t.Run(path+"/"+terminal, func(t *testing.T) {
+				body := configuredRetryOutput("tool") + configuredRetryEvent(fmt.Sprintf(`{"type":%q,"response":{"id":"resp_tool_success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`, terminal))
+				c, rec := newOpenAIConfiguredRetryContext()
+				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, newConfiguredStreamRetryAccount(), path)
+				require.NoError(t, err)
+				require.Contains(t, rec.Body.String(), "call_private")
+				require.Contains(t, rec.Body.String(), "lookup")
+			})
+		}
+	}
+}
+
+func TestOpenAIConfiguredStreamRetryDefersOnlyProgress(t *testing.T) {
+	for _, eventType := range []string{
+		"response.reasoning_summary_text.delta", "response.reasoning_text.done",
+		"response.reasoning_summary_part.done", "response.function_call_arguments.delta",
+		"response.custom_tool_call_input.done", "response.web_search_call.completed",
+		"response.file_search_call.in_progress", "response.code_interpreter_call_code.delta",
+		"response.mcp_call.completed",
+	} {
+		require.True(t, openAIStreamDefersProgressForRetry(`{}`, eventType), eventType)
+	}
+	for _, kind := range []string{"reasoning", "compaction", "function_call", "custom_tool_call", "web_search_call", "file_search_call", "code_interpreter_call", "computer_call", "mcp_call", "mcp_list_tools", "mcp_approval_request"} {
+		for _, eventType := range []string{"response.output_item.added", "response.output_item.done"} {
+			require.True(t, openAIStreamDefersProgressForRetry(fmt.Sprintf(`{"item":{"type":%q}}`, kind), eventType), kind)
+		}
+	}
+	for _, eventType := range []string{
+		"response.output_text.delta", "response.output_text.done", "response.refusal.delta",
+		"response.output_audio.delta", "response.image_generation_call.partial_image",
+		"response.completed", "response.done", "response.failed", "error", "future.event",
+	} {
+		require.False(t, openAIStreamDefersProgressForRetry(`{}`, eventType), eventType)
+	}
+	require.False(t, openAIStreamDefersProgressForRetry(`{"item":{"type":"message","content":[{"type":"output_text","text":"answer"}]}}`, "response.output_item.done"))
+	require.False(t, openAIStreamDefersProgressForRetry(`{"part":{"type":"output_text","text":"answer"}}`, "response.content_part.done"))
+	require.True(t, openAIStreamDefersProgressForRetry(`{"part":{"type":"summary_text","text":"reasoning"}}`, "response.content_part.done"))
 }

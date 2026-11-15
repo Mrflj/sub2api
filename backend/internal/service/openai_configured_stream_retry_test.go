@@ -40,7 +40,7 @@ func runConfiguredRetryStream(svc *OpenAIGatewayService, c *gin.Context, resp *h
 	return runOpenAIOpaquePreambleStream(svc, c, resp, account, path)
 }
 
-func TestOpenAIConfiguredStreamRetryDoesNotReplayDeliveredOutput(t *testing.T) {
+func TestOpenAIConfiguredStreamRetryReleasesProgressOnlyOnSuccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, kind := range []string{"reasoning", "tool", "text"} {
@@ -61,6 +61,12 @@ func TestOpenAIConfiguredStreamRetryDoesNotReplayDeliveredOutput(t *testing.T) {
 						if kind != "reasoning" || path != "chat" {
 							require.Contains(t, rec.Body.String(), map[string]string{"reasoning": "private reasoning", "tool": "lookup", "text": "private answer"}[kind])
 						}
+					} else if kind != "text" {
+						var failover *UpstreamFailoverError
+						require.ErrorAs(t, err, &failover)
+						require.True(t, failover.RetryableOnSameAccount)
+						require.Empty(t, rec.Body.String())
+						require.False(t, c.Writer.Written())
 					} else {
 						var failover *UpstreamFailoverError
 						require.Error(t, err)
@@ -91,27 +97,35 @@ func newOpenAIConfiguredRetryContext() (*gin.Context, *httptest.ResponseRecorder
 }
 
 func TestOpenAIConfiguredStreamRetryPreservesUnconfiguredDelivery(t *testing.T) {
-	for _, policy := range []string{"non_pool", "zero_retries", "502_not_configured"} {
+	for _, policy := range []string{"non_pool", "zero_retries", "empty_status_codes", "502_not_configured"} {
 		for _, path := range []string{"native", "passthrough", "messages", "chat"} {
-			t.Run(policy+"/"+path, func(t *testing.T) {
-				account := newConfiguredStreamRetryAccount()
-				switch policy {
-				case "non_pool":
-					account.Credentials["pool_mode"] = false
-				case "zero_retries":
-					account.Credentials["pool_mode_retry_count"] = float64(0)
-				case "502_not_configured":
-					account.Credentials["pool_mode_retry_status_codes"] = []any{float64(503)}
-				}
-				c, rec := newOpenAIConfiguredRetryContext()
-				body := configuredRetryOutput("text") + configuredRetryEvent(messagesBPSFailure)
-				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
-				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
-				var failover *UpstreamFailoverError
-				require.Error(t, err)
-				require.NotErrorAs(t, err, &failover)
-				require.Contains(t, rec.Body.String(), "private answer")
-			})
+			kinds := []string{"text", "reasoning", "tool"}
+			if policy == "502_not_configured" {
+				kinds = []string{"text"}
+			}
+			for _, kind := range kinds {
+				t.Run(policy+"/"+path+"/"+kind, func(t *testing.T) {
+					account := newConfiguredStreamRetryAccount()
+					switch policy {
+					case "non_pool":
+						account.Credentials["pool_mode"] = false
+					case "zero_retries":
+						account.Credentials["pool_mode_retry_count"] = float64(0)
+					case "empty_status_codes":
+						account.Credentials["pool_mode_retry_status_codes"] = []any{}
+					case "502_not_configured":
+						account.Credentials["pool_mode_retry_status_codes"] = []any{float64(503)}
+					}
+					c, rec := newOpenAIConfiguredRetryContext()
+					body := configuredRetryOutput(kind) + configuredRetryEvent(messagesBPSFailure)
+					resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+					err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
+					var failover *UpstreamFailoverError
+					require.Error(t, err)
+					require.NotErrorAs(t, err, &failover)
+					require.Contains(t, rec.Body.String(), map[string]string{"text": "private answer", "reasoning": "private reasoning", "tool": "lookup"}[kind])
+				})
+			}
 		}
 	}
 }
@@ -132,7 +146,7 @@ func TestOpenAIConfiguredStreamRetryKeepsProgressWhilePreamblePrivate(t *testing
 			progress := make(chan bool, 1)
 			go func() {
 				defer writer.Close()
-				_, _ = io.WriteString(writer, configuredRetryOpaquePreamble())
+				_, _ = io.WriteString(writer, configuredRetryOpaquePreamble()+configuredRetryOutput("reasoning")+configuredRetryWebSearchOutput())
 				select {
 				case <-budget.progress:
 					progress <- true
@@ -211,7 +225,7 @@ func TestOpenAIConfiguredStreamRetryKeepsHeartbeatsReplaySafe(t *testing.T) {
 			heartbeatSeen := make(chan bool, 1)
 			go func() {
 				defer writer.Close()
-				_, _ = io.WriteString(writer, configuredRetryOpaquePreamble())
+				_, _ = io.WriteString(writer, configuredRetryOpaquePreamble()+configuredRetryOutput("reasoning")+configuredRetryWebSearchOutput())
 				ticker := time.NewTicker(50 * time.Millisecond)
 				defer ticker.Stop()
 				deadline := time.NewTimer(4 * time.Second)
@@ -277,7 +291,7 @@ func TestOpenAIConfiguredStreamRetryDoesNotReplayCancellation(t *testing.T) {
 	}
 }
 
-func TestOpenAIConfiguredStreamRetryPreservesDeliveredToolsOnNonRetryableFailure(t *testing.T) {
+func TestOpenAIConfiguredStreamRetryDiscardsPrivateToolsOnNonRetryableFailure(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		t.Run(path, func(t *testing.T) {
 			c, rec := newOpenAIConfiguredRetryContext()
@@ -287,13 +301,14 @@ func TestOpenAIConfiguredStreamRetryPreservesDeliveredToolsOnNonRetryableFailure
 			var failover *UpstreamFailoverError
 			require.Error(t, err)
 			require.NotErrorAs(t, err, &failover)
-			require.Contains(t, rec.Body.String(), "call_private")
-			require.Contains(t, rec.Body.String(), "lookup")
+			require.NotContains(t, rec.Body.String(), "call_private")
+			require.NotContains(t, rec.Body.String(), "lookup")
+			require.Contains(t, rec.Body.String(), "error")
 		})
 	}
 }
 
-func TestOpenAIConfiguredStreamRetryPassthroughBareErrorDoesNotReplayDeliveredTools(t *testing.T) {
+func TestOpenAIConfiguredStreamRetryPassthroughBareErrorDiscardsPrivateTools(t *testing.T) {
 	for _, completed := range []bool{false, true} {
 		t.Run(fmt.Sprint(completed), func(t *testing.T) {
 			c, rec := newOpenAIConfiguredRetryContext()
@@ -306,7 +321,7 @@ func TestOpenAIConfiguredStreamRetryPassthroughBareErrorDoesNotReplayDeliveredTo
 			require.Error(t, err)
 			var failover *UpstreamFailoverError
 			require.NotErrorAs(t, err, &failover)
-			require.Contains(t, rec.Body.String(), "call_private")
+			require.NotContains(t, rec.Body.String(), "call_private")
 			require.Contains(t, rec.Body.String(), "response.failed")
 		})
 	}

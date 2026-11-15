@@ -24,7 +24,8 @@ func TestOpenAIEncryptedContentPoolRetryStream(t *testing.T) {
 				c, rec := newOpenAIConfiguredRetryContext()
 				policy := openAIEncryptedContentRecoveryPolicy{body: []byte(`{"input":[{"type":"reasoning","encrypted_content":"private-ciphertext","summary":[]}]}`)}
 				c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), openAIEncryptedContentRecoveryContextKey{}, policy))
-				body := configuredRetryEvent(`{"type":"response.created","response":{"id":"rejected-attempt"}}`) + configuredRetryEvent(event)
+				body := configuredRetryEvent(`{"type":"response.created","response":{"id":"rejected-attempt"}}`) +
+					configuredRetryOutput("reasoning") + configuredRetryOutput("tool") + configuredRetryEvent(event)
 				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Request-Id": {"encrypted-attempt"}}, Body: io.NopCloser(strings.NewReader(body))}
 				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
 				var retry *UpstreamFailoverError
@@ -87,11 +88,14 @@ func TestOpenAIEncryptedContentPoolRetryDoesNotReplayCommittedOutput(t *testing.
 		for _, output := range []string{"text", "tool"} {
 			t.Run(fmt.Sprintf("%s/%s", path, output), func(t *testing.T) {
 				account := newConfiguredStreamRetryAccount()
-				// A configured 400 retry must not turn on the existing whole-attempt
-				// 502 buffer or replay semantic output already sent downstream.
+				// A configured 400 retry must not replay answer output already sent.
 				account.Credentials["pool_mode_retry_status_codes"] = []any{float64(400)}
 				c, _ := newOpenAIConfiguredRetryContext()
-				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(configuredRetryOutput(output) + configuredRetryEvent(encryptedPoolRetryFailure)))}
+				body := configuredRetryOutput(output)
+				if output == "tool" {
+					body += configuredRetryOutput("text")
+				}
+				resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body + configuredRetryEvent(encryptedPoolRetryFailure)))}
 				err := runConfiguredRetryStream(&OpenAIGatewayService{cfg: &config.Config{}}, c, resp, account, path)
 				var retry *UpstreamFailoverError
 				require.NotErrorAs(t, err, &retry)

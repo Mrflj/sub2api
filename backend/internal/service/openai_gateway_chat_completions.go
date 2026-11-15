@@ -1145,6 +1145,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			observeOpenAIHTTPProgress(c.Request.Context())
 		}
 		chunks := apicompat.ResponsesEventToChatChunks(&event, state)
+		deferProgress := retryStage != nil && !clientOutputStarted && openAIStreamDefersProgressForRetry(payload, event.Type)
 		if firstTokenMs == nil {
 			for _, chunk := range chunks {
 				if openAIChatChunkHasOutput(chunk) {
@@ -1166,9 +1167,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					continue
 				}
 				// A role-only chunk is protocol metadata, regardless of request size.
-				// Keep it private until useful output or a successful terminal so a
-				// subsequent capacity rejection can still enter bounded failover.
-				if !clientOutputStarted && ((!isTerminalEvent && !openAIChatChunkHasOutput(chunk)) || !refusalDetector.ShouldReleaseClientOutput()) {
+				// Configured pools also keep tool/reasoning progress private until
+				// answer output or success, preserving bounded retry on failure.
+				if !clientOutputStarted && ((!isTerminalEvent && (deferProgress || !openAIChatChunkHasOutput(chunk))) || !refusalDetector.ShouldReleaseClientOutput()) {
 					if retryStage != nil && !retryStage.closed {
 						if _, err := retryStage.WriteString(sse); err != nil {
 							streamFailoverErr = s.newOpenAIStreamFailoverError(c, account, false, requestID, nil, "OpenAI chat pre-output staging failed")
