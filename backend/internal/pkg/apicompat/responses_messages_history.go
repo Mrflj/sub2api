@@ -370,6 +370,37 @@ func restoreResponsesHistory(blocks []AnthropicContentBlock, scope string) ([]Re
 	return items, true, nil
 }
 
+// ResponsesHistoryMatchesAssistantContent checks only the exact projection
+// carried by a negotiated relay message. A transit relay does not know the
+// origin's routed-account scope, so this does NOT authenticate that scope or
+// authorize replay. The origin still enforces its actual account/model scope.
+// It lets the transit relay keep a valid capsule and its visible hosted blocks
+// together instead of destroying one side of their consistency contract.
+func ResponsesHistoryMatchesAssistantContent(content json.RawMessage) bool {
+	if len(content) > maxResponsesHistoryBytes*2 {
+		return false
+	}
+	var blocks []AnthropicContentBlock
+	if json.Unmarshal(content, &blocks) != nil {
+		return false
+	}
+	var scope string
+	for _, block := range blocks {
+		if block.Type == ResponsesHistoryBlockType {
+			var envelope responsesHistoryEnvelope
+			if json.Unmarshal(block.Content, &envelope) != nil {
+				return false
+			}
+			scope = envelope.Scope
+		}
+	}
+	if !validResponsesHistoryScope(scope) {
+		return false
+	}
+	_, restored, err := restoreResponsesHistory(blocks, scope)
+	return restored && err == nil
+}
+
 // Capture only original provider items. No model invocation, invented search
 // result or synthetic signature is involved in preserving this state.
 type responsesHistoryStream struct {

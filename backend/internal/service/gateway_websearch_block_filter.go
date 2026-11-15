@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -44,6 +46,26 @@ var (
 // empty gets a placeholder text block (mirroring FilterThinkingBlocksForRetry).
 // Returns the original body unchanged when nothing needs stripping.
 func FilterWebSearchHistoryBlocks(body []byte, mappedModel string) []byte {
+	return filterWebSearchHistoryBlocks(body, mappedModel, false)
+}
+
+// FilterWebSearchHistoryBlocksForRelay keeps the exact hosted projection of a
+// valid Responses-history capsule on a negotiated Messages relay. The legacy
+// emulation prefix also matches real Responses ws_ IDs after conversion; that
+// prefix alone cannot establish that these blocks were locally fabricated.
+// Callers must negotiate ResponsesHistoryHeader before using this variant.
+func FilterWebSearchHistoryBlocksForRelay(body []byte, mappedModel string) []byte {
+	return filterWebSearchHistoryBlocks(body, mappedModel, true)
+}
+
+func filterWebSearchHistoryBlocksForRequest(c *gin.Context, body []byte, mappedModel string) []byte {
+	if c != nil && c.Request != nil && strings.EqualFold(strings.TrimSpace(c.GetHeader(apicompat.ResponsesHistoryHeader)), "v1") {
+		return FilterWebSearchHistoryBlocksForRelay(body, mappedModel)
+	}
+	return FilterWebSearchHistoryBlocks(body, mappedModel)
+}
+
+func filterWebSearchHistoryBlocks(body []byte, mappedModel string, preserveResponsesHistory bool) []byte {
 	if !bytes.Contains(body, patternServerToolUse) && !bytes.Contains(body, patternWebSearchToolResult) {
 		return body
 	}
@@ -57,7 +79,9 @@ func FilterWebSearchHistoryBlocks(body []byte, mappedModel string) []byte {
 	}
 
 	var messages []any
-	if err := json.Unmarshal(sliceRawFromBody(body, msgsRes), &messages); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(sliceRawFromBody(body, msgsRes)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&messages); err != nil {
 		return body
 	}
 
@@ -70,6 +94,14 @@ func FilterWebSearchHistoryBlocks(body []byte, mappedModel string) []byte {
 		content, ok := msgMap["content"].([]any)
 		if !ok {
 			continue
+		}
+		if preserveResponsesHistory && !stripAll && msgMap["role"] == "assistant" {
+			// Validate each assistant independently. A capsule in another turn,
+			// or a stale/malformed/mismatched one, cannot exempt these blocks.
+			raw, err := json.Marshal(content)
+			if err == nil && apicompat.ResponsesHistoryMatchesAssistantContent(raw) {
+				continue
+			}
 		}
 
 		// 延迟分配：只有命中需剥离的块才构建新 slice。
