@@ -73,6 +73,8 @@ var (
 	// ARGV[1] = maxConcurrency
 	// ARGV[2] = TTL（秒）
 	// ARGV[3] = requestID
+	// ARGV[4] = 1 enables statistics-only user slots when maxConcurrency <= 0.
+	// Account callers omit this flag: zero-capacity account admission stays closed.
 	// 返回 {是否成功, Redis 当前秒}，Go 侧复用同一时间源写活跃索引，省去额外 TIME 往返。
 	acquireScript = redis.NewScript(`
 		-- Redis 3.2-4.x compat: opt into effects replication so redis.call('TIME')
@@ -103,7 +105,7 @@ var (
 
 		-- 检查是否达到并发上限
 		local count = redis.call('ZCARD', key) + redis.call('ZCARD', liveKey)
-		if count < maxConcurrency then
+		if count < maxConcurrency or (maxConcurrency <= 0 and ARGV[4] == '1') then
 			redis.call('ZADD', key, now, requestID)
 			redis.call('EXPIRE', key, ttl)
 			return {1, now}
@@ -282,7 +284,7 @@ var (
 		if accountMax > 0 then
 			redis.call('ZREM', accountRegular, accountSource)
 		end
-		if userMax > 0 then
+		if userSource ~= '' then
 			redis.call('ZREM', userRegular, userSource)
 		end
 		-- A stats-only key member is moved as well, so the unlimited tracking
@@ -928,7 +930,7 @@ func (c *concurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, accou
 func (c *concurrencyCache) AcquireUserSlot(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
 	key := userSlotKey(userID)
 	// 时间戳在 Lua 脚本内使用 Redis TIME 命令获取，确保多实例时钟一致
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveUserSlotKey(userID)}, maxConcurrency, c.slotTTLSeconds, requestID)
+	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveUserSlotKey(userID)}, maxConcurrency, c.slotTTLSeconds, requestID, 1)
 	if err != nil {
 		return false, err
 	}
@@ -937,6 +939,14 @@ func (c *concurrencyCache) AcquireUserSlot(ctx context.Context, userID int64, ma
 		c.touchActiveIndexAt(ctx, userActiveIndexKey, userID, now+int64(c.slotTTLSeconds))
 	}
 	return result == 1, nil
+}
+
+func (c *concurrencyCache) AcquireUnlimitedUserSlot(ctx context.Context, userID int64, requestID string) (bool, error) {
+	return c.AcquireUserSlot(ctx, userID, 0, requestID)
+}
+
+func (c *concurrencyCache) ReleaseUnlimitedUserSlot(ctx context.Context, userID int64, requestID string) error {
+	return c.ReleaseUserSlot(ctx, userID, requestID)
 }
 
 func (c *concurrencyCache) ReleaseUserSlot(ctx context.Context, userID int64, requestID string) error {

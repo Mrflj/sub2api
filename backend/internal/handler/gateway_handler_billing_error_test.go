@@ -55,6 +55,17 @@ func TestBillingErrorDetails_UserBalanceIsExplicit(t *testing.T) {
 	require.Equal(t, service.InsufficientUserBalanceMessage, msg)
 }
 
+func TestBillingErrorDetails_InflightBalanceBusyIsRetryable(t *testing.T) {
+	status, code, msg, retryAfter := billingErrorDetails(service.ErrInflightBalanceBusy.WithMetadata(map[string]string{
+		"balance_usd": "1.52", "reserved_usd": "0.9", "estimated_usd": "0.9",
+	}))
+	require.Equal(t, http.StatusTooManyRequests, status)
+	require.Equal(t, "rate_limit_exceeded", code)
+	require.Contains(t, msg, "预留")
+	require.NotContains(t, msg, "充值")
+	require.Equal(t, 5, retryAfter)
+}
+
 func TestExtractQuotaResetSeconds_T19_HappyPath(t *testing.T) {
 	err := service.ErrUserPlatformDailyQuotaExhausted.WithMetadata(map[string]string{
 		"window_resets_at": time.Now().Add(10 * time.Second).UTC().Format(time.RFC3339),

@@ -88,7 +88,7 @@ func TestSyncBalanceCacheAfterDeduction_InvalidatesExhaustedBalance(t *testing.T
 
 	err := svc.CheckBillingEligibility(context.Background(), &User{ID: 1}, nil, nil, nil, "")
 	require.ErrorIs(t, err, ErrInsufficientBalance)
-	require.Equal(t, int64(1), userRepo.calls.Load())
+	require.Equal(t, int64(2), userRepo.calls.Load(), "a rejected balance is verified against the database before responding")
 }
 
 func TestSyncBalanceCacheAfterDeduction_InvalidatesWhenBalanceFallsBelowReserve(t *testing.T) {

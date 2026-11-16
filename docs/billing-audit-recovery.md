@@ -89,3 +89,33 @@ row. Ordinary and regional writers read the same effective monthly anchor under
 the baseline row lock, and advance together only at the 30-day boundary. Checked
 auth invalidation errors (including key lookup and broadcast) leave cache work
 pending; an unchecked/absent invalidator cannot acknowledge key-quota exhaustion.
+
+## Positive-balance admission failures
+
+The displayed database balance is distinct from Redis's cached balance and
+estimated reservations for requests still in flight. A reservation never debits
+the database. Before rejecting a cached balance, admission rechecks the database
+and invalidates a stale cache value. Reservation rejection also retries the same
+unregistered request ID atomically using the fresh balance. Successful fast paths
+add no DB read; concurrent rejection rechecks are coalesced per user.
+
+Exhausted balance or a configured minimum-balance floor still returns HTTP 403.
+Temporary reservation contention now returns HTTP 429 with `Retry-After: 5`,
+instead of telling a user with remaining money to recharge. Database verification
+failure and fail-closed unpriced models return billing-service HTTP 503. Request
+error metadata records the stage, user ID, observed/verified balance, reserved
+amount and new estimate without recording credentials or request contents.
+
+Regression fixtures cover a DB balance of $1.52 with stale cached $0.25, existing
+$0.20 reservation and $0.50 new estimate (admitted after recheck); and actual
+$1.52 balance with two $0.90 estimates (second is temporarily limited and passes
+after release without a recharge). These are isolated fixtures, not claims about
+the balances cached during a historical production error.
+
+Independent sites must not share one Redis logical database: keys such as
+`billing:balance:<user_id>` and `billing:inflight:{<user_id>}` have no site prefix.
+Matching user IDs would mix balances and reservations across the sites. Distinct
+Redis instances or logical databases isolate these caches. For historical
+failures, correlate the B gateway's request ID with
+`gateway.billing_eligibility_check_failed` or
+`gateway.inflight_reservation_rejected` before asserting a specific cause.

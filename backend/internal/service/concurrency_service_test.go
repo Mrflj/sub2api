@@ -38,6 +38,12 @@ type stubConcurrencyCacheForTest struct {
 	// 记录调用
 	releasedAccountIDs       []int64
 	releasedRequestIDs       []string
+	acquiredUserIDs          []int64
+	acquiredUserLimits       []int
+	acquiredUserRequestIDs   []string
+	releasedUserIDs          []int64
+	releasedUserRequestIDs   []string
+	releasedUserContextErr   error
 	loadBatchCalls           atomic.Int64
 	trackedAPIKeyIDs         []int64
 	trackedAPIKeyRequestIDs  []string
@@ -117,10 +123,16 @@ func (c *stubConcurrencyCacheForTest) DecrementAccountWaitCount(_ context.Contex
 func (c *stubConcurrencyCacheForTest) GetAccountWaitingCount(_ context.Context, _ int64) (int, error) {
 	return c.waitCount, c.waitCountErr
 }
-func (c *stubConcurrencyCacheForTest) AcquireUserSlot(_ context.Context, _ int64, _ int, _ string) (bool, error) {
+func (c *stubConcurrencyCacheForTest) AcquireUserSlot(_ context.Context, userID int64, limit int, requestID string) (bool, error) {
+	c.acquiredUserIDs = append(c.acquiredUserIDs, userID)
+	c.acquiredUserLimits = append(c.acquiredUserLimits, limit)
+	c.acquiredUserRequestIDs = append(c.acquiredUserRequestIDs, requestID)
 	return c.acquireResult, c.acquireErr
 }
-func (c *stubConcurrencyCacheForTest) ReleaseUserSlot(_ context.Context, _ int64, _ string) error {
+func (c *stubConcurrencyCacheForTest) ReleaseUserSlot(ctx context.Context, userID int64, requestID string) error {
+	c.releasedUserIDs = append(c.releasedUserIDs, userID)
+	c.releasedUserRequestIDs = append(c.releasedUserRequestIDs, requestID)
+	c.releasedUserContextErr = ctx.Err()
 	return c.releaseErr
 }
 func (c *stubConcurrencyCacheForTest) GetUserConcurrency(_ context.Context, _ int64) (int, error) {
@@ -262,11 +274,57 @@ func TestAcquireUserSlot_IndependentFromAccount(t *testing.T) {
 }
 
 func TestAcquireUserSlot_UnlimitedConcurrency(t *testing.T) {
-	svc := NewConcurrencyService(&stubConcurrencyCacheForTest{})
+	for _, limit := range []int{0, -1} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			cache := &stubConcurrencyCacheForTest{acquireResult: true}
+			svc := NewConcurrencyService(cache)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result, err := svc.AcquireUserSlot(ctx, 1, limit)
+			require.NoError(t, err)
+			require.True(t, result.Acquired)
+			require.NotEmpty(t, result.RequestID)
+			require.Equal(t, []int64{1}, cache.acquiredUserIDs)
+			require.Equal(t, []int{limit}, cache.acquiredUserLimits)
+			require.Equal(t, []string{result.RequestID}, cache.acquiredUserRequestIDs)
+			cancel()
+			result.ReleaseFunc()
+			result.ReleaseFunc()
+			require.Equal(t, []int64{1}, cache.releasedUserIDs)
+			require.Equal(t, cache.acquiredUserRequestIDs, cache.releasedUserRequestIDs)
+			require.NoError(t, cache.releasedUserContextErr, "cleanup must survive request cancellation")
+		})
+	}
+}
 
-	result, err := svc.AcquireUserSlot(context.Background(), 1, 0)
+func TestAcquireUserSlot_UnlimitedTrackingFailureDoesNotLimit(t *testing.T) {
+	for _, cacheErr := range []error{nil, errors.New("statistics unavailable")} {
+		cache := &stubConcurrencyCacheForTest{acquireErr: cacheErr}
+		svc := NewConcurrencyService(cache)
+		result, err := svc.AcquireUserSlot(context.Background(), 1, 0)
+		require.NoError(t, err)
+		require.True(t, result.Acquired)
+		result.ReleaseFunc()
+		require.Equal(t, cache.acquiredUserRequestIDs, cache.releasedUserRequestIDs, "ambiguous writes must retain cleanup")
+	}
+	result, err := NewConcurrencyService(nil).AcquireUserSlot(context.Background(), 1, 0)
 	require.NoError(t, err)
 	require.True(t, result.Acquired)
+	result.ReleaseFunc()
+}
+
+func TestAcquireUserSlot_LimitedAdmissionUnchanged(t *testing.T) {
+	cache := &stubConcurrencyCacheForTest{}
+	svc := NewConcurrencyService(cache)
+	result, err := svc.AcquireUserSlot(context.Background(), 1, 1)
+	require.NoError(t, err)
+	require.False(t, result.Acquired)
+	require.Nil(t, result.ReleaseFunc)
+	cache.acquireErr = errors.New("admission unavailable")
+	result, err = svc.AcquireUserSlot(context.Background(), 1, 1)
+	require.ErrorIs(t, err, cache.acquireErr)
+	require.Nil(t, result)
+	require.Empty(t, cache.releasedUserIDs)
 }
 
 func TestTrackAPIKeySlot_ReleaseDecrements(t *testing.T) {

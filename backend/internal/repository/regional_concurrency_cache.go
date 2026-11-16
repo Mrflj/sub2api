@@ -77,6 +77,12 @@ func (c *regionalConcurrencyCache) AcquireUserSlot(ctx context.Context, id int64
 func (c *regionalConcurrencyCache) ReleaseUserSlot(ctx context.Context, id int64, request string) error {
 	return c.release(ctx, "user", id, request)
 }
+func (c *regionalConcurrencyCache) AcquireUnlimitedUserSlot(ctx context.Context, id int64, request string) (bool, error) {
+	return c.ConcurrencyCache.AcquireUserSlot(ctx, id, 0, request)
+}
+func (c *regionalConcurrencyCache) ReleaseUnlimitedUserSlot(ctx context.Context, id int64, request string) error {
+	return c.ConcurrencyCache.ReleaseUserSlot(ctx, id, request)
+}
 func (c *regionalConcurrencyCache) AcquireAPIKeySlot(ctx context.Context, id int64, _ int, request string) (bool, error) {
 	return c.acquire(ctx, "api_key", id, request)
 }
@@ -84,7 +90,12 @@ func (c *regionalConcurrencyCache) GetAccountConcurrency(ctx context.Context, id
 	return c.count(ctx, "account", id)
 }
 func (c *regionalConcurrencyCache) GetUserConcurrency(ctx context.Context, id int64) (int, error) {
-	return c.count(ctx, "user", id)
+	n, err := c.count(ctx, "user", id)
+	if err != nil {
+		return 0, err
+	}
+	stats, err := c.ConcurrencyCache.GetUserConcurrency(ctx, id)
+	return n + stats, err
 }
 func (c *regionalConcurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, ids []int64) (map[int64]int, error) {
 	return c.counts(ctx, "account", ids)
@@ -188,23 +199,23 @@ func (c *regionalConcurrencyCache) GetAccountsLoadBatch(ctx context.Context, acc
 	return out, nil
 }
 func (c *regionalConcurrencyCache) GetUsersLoadBatch(ctx context.Context, users []service.UserWithConcurrency) (map[int64]*service.UserLoadInfo, error) {
-	// The auxiliary Redis result contains local queue information only; replace
-	// all concurrency counts with the authoritative persistent budget.
+	// Redis contains queue information and unlimited-user activity. Limited user
+	// admission stays in SQL; sum both so changing a limit cannot hide old slots.
 	out, err := c.ConcurrencyCache.GetUsersLoadBatch(ctx, users)
 	if err != nil {
 		return nil, err
 	}
 	for _, u := range users {
-		n, err := c.GetUserConcurrency(ctx, u.ID)
+		n, err := c.count(ctx, "user", u.ID)
 		if err != nil {
 			return nil, err
 		}
 		if out[u.ID] == nil {
 			out[u.ID] = &service.UserLoadInfo{UserID: u.ID}
 		}
-		out[u.ID].CurrentConcurrency = n
+		out[u.ID].CurrentConcurrency += n
 		if u.MaxConcurrency > 0 {
-			out[u.ID].LoadRate = (n + out[u.ID].WaitingCount) * 100 / u.MaxConcurrency
+			out[u.ID].LoadRate = (out[u.ID].CurrentConcurrency + out[u.ID].WaitingCount) * 100 / u.MaxConcurrency
 		}
 	}
 	return out, nil

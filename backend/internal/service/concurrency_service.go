@@ -62,6 +62,14 @@ type APIKeyConcurrencyCache interface {
 	GetAPIKeyConcurrencyBatch(ctx context.Context, apiKeyIDs []int64) (map[int64]int, error)
 }
 
+// UnlimitedUserConcurrencyCache records activity without consuming an admission
+// budget. Regional caches use their auxiliary cache for this statistics-only
+// dimension instead of trying to acquire a zero-capacity regional grant.
+type UnlimitedUserConcurrencyCache interface {
+	AcquireUnlimitedUserSlot(ctx context.Context, userID int64, requestID string) (bool, error)
+	ReleaseUnlimitedUserSlot(ctx context.Context, userID int64, requestID string) error
+}
+
 // OpenAIWSIngressLeaseCache owns the short-lived distributed lease used to
 // bound live client WebSocket sessions. It is deliberately independent of the
 // request-slot namespace: idle ingress connections do not occupy turn slots.
@@ -416,36 +424,46 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 }
 
 // AcquireUserSlot attempts to acquire a concurrency slot for a user.
-// If the user is at max concurrency, it waits until a slot is available or timeout.
+// A non-positive limit skips admission checks, but still records active requests.
 // Returns a release function that MUST be called when the request completes.
 func (s *ConcurrencyService) AcquireUserSlot(ctx context.Context, userID int64, maxConcurrency int) (*AcquireResult, error) {
-	// If maxConcurrency is 0 or negative, no limit
-	if maxConcurrency <= 0 {
-		return &AcquireResult{
-			Acquired:    true,
-			ReleaseFunc: func() {}, // no-op
-		}, nil
+	unlimited := maxConcurrency <= 0
+	if unlimited && (s == nil || s.cache == nil) {
+		return &AcquireResult{Acquired: true, ReleaseFunc: func() {}}, nil
 	}
 
 	// Generate unique request ID for this slot
 	requestID := generateRequestID()
-
-	acquired, err := s.cache.AcquireUserSlot(ctx, userID, maxConcurrency, requestID)
-	if err != nil {
-		return nil, err
+	acquire := s.cache.AcquireUserSlot
+	release := s.cache.ReleaseUserSlot
+	if tracker, ok := s.cache.(UnlimitedUserConcurrencyCache); unlimited && ok {
+		acquire = func(ctx context.Context, id int64, _ int, request string) (bool, error) {
+			return tracker.AcquireUnlimitedUserSlot(ctx, id, request)
+		}
+		release = tracker.ReleaseUnlimitedUserSlot
 	}
 
-	if acquired {
+	acquired, err := acquire(ctx, userID, maxConcurrency, requestID)
+	if err != nil {
+		if !unlimited {
+			return nil, err
+		}
+		// Statistics failures must not introduce a new admission restriction.
+		// Retain cleanup because a write may have succeeded before its reply failed.
+		logger.LegacyPrintf("service.concurrency", "Warning: failed to track unlimited user slot for %d (req=%s): %v", userID, requestID, err)
+	}
+
+	if acquired || unlimited {
 		return &AcquireResult{
 			Acquired:  true,
 			RequestID: requestID,
-			ReleaseFunc: func() {
+			ReleaseFunc: sync.OnceFunc(func() {
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
-				if err := s.cache.ReleaseUserSlot(bgCtx, userID, requestID); err != nil {
+				if err := release(bgCtx, userID, requestID); err != nil {
 					logger.LegacyPrintf("service.concurrency", "Warning: failed to release user slot for %d (req=%s): %v", userID, requestID, err)
 				}
-			},
+			}),
 		}, nil
 	}
 

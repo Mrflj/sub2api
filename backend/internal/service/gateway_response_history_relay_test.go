@@ -83,6 +83,39 @@ func TestResponsesHistoryRelayFilterPreservesMatchedProjection(t *testing.T) {
 	}
 }
 
+func TestResponsesHistoryRelayAdjacentAssistantBoundary(t *testing.T) {
+	body := responsesHistoryRelayBody(t)
+	var request apicompat.AnthropicRequest
+	require.NoError(t, json.Unmarshal(body, &request))
+	// Model the adapter's old same-role merge: the visible text changes while
+	// the opaque capsule still describes only the original assistant turn.
+	var blocks []apicompat.AnthropicContentBlock
+	require.NoError(t, json.Unmarshal(request.Messages[1].Content, &blocks))
+	blocks = append(blocks, apicompat.AnthropicContentBlock{Type: "text", Text: "Additional project context."})
+	merged, err := json.Marshal(blocks)
+	require.NoError(t, err)
+	bad, err := sjson.SetRawBytes(body, "messages.1.content", merged)
+	require.NoError(t, err)
+	_, err = convertResponsesHistoryRelay(t, bad)
+	require.ErrorContains(t, err, "Responses history does not match the assistant message")
+
+	// Keep the additional assistant turn separate, even though roles repeat.
+	messages := gjson.GetBytes(body, "messages").Array()
+	separate := []json.RawMessage{json.RawMessage(messages[0].Raw), json.RawMessage(messages[1].Raw),
+		json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"Additional project context."}]}`), json.RawMessage(messages[2].Raw)}
+	raw, err := json.Marshal(separate)
+	require.NoError(t, err)
+	good, err := sjson.SetRawBytes(body, "messages", raw)
+	require.NoError(t, err)
+	forwarded := FilterWebSearchHistoryBlocksForRelay(good, "claude-opus-5-5")
+	replay, err := convertResponsesHistoryRelay(t, forwarded)
+	require.NoError(t, err)
+	require.Contains(t, string(replay.Input), "Synthetic progress.")
+	require.Contains(t, string(replay.Input), "Additional project context.")
+	require.Contains(t, string(replay.Input), "example.invalid/a")
+	require.Contains(t, string(replay.Input), "todo saved")
+}
+
 func TestResponsesHistoryRelayFilterDoesNotTrustMissingOrChangedCapsules(t *testing.T) {
 	body := responsesHistoryRelayBody(t)
 	for name, mutate := range map[string]func([]byte) ([]byte, error){
@@ -128,6 +161,12 @@ func TestResponsesHistoryRelayActualAnthropicForwardPreservesOriginReplay(t *tes
 	for _, passthrough := range []bool{true, false} {
 		t.Run(map[bool]string{true: "apikey-passthrough", false: "standard-forward"}[passthrough], func(t *testing.T) {
 			body := responsesHistoryRelayBody(t)
+			messages := gjson.GetBytes(body, "messages").Array()
+			adjacent, err := json.Marshal([]json.RawMessage{json.RawMessage(messages[0].Raw), json.RawMessage(messages[1].Raw),
+				json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"Additional project context."}]}`), json.RawMessage(messages[2].Raw)})
+			require.NoError(t, err)
+			body, err = sjson.SetRawBytes(body, "messages", adjacent)
+			require.NoError(t, err)
 			originUpstream := &httpUpstreamRecorder{resp: openAICompatSSECompletedResponse("resp_origin_after_relay", "gpt-5.5")}
 			origin := &OpenAIGatewayService{httpUpstream: originUpstream, cfg: &config.Config{}}
 			originAccount := &Account{ID: 94802, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1, Credentials: map[string]any{"access_token": "fixture-token", "chatgpt_account_id": "fixture-account"}}
@@ -136,7 +175,6 @@ func TestResponsesHistoryRelayActualAnthropicForwardPreservesOriginReplay(t *tes
 			originContext.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 			originContext.Request.Header.Set(apicompat.ResponsesHistoryHeader, "v1")
 			originScope := openAIMessagesResponseHistoryScope(originContext, originAccount, "gpt-5.5")
-			var err error
 			body, err = sjson.SetBytes(body, "messages.1.content.7.content.scope", originScope)
 			require.NoError(t, err)
 			rec := httptest.NewRecorder()
@@ -167,6 +205,7 @@ func TestResponsesHistoryRelayActualAnthropicForwardPreservesOriginReplay(t *tes
 			require.Contains(t, string(originUpstream.lastBody), "example.invalid/b")
 			require.Contains(t, string(originUpstream.lastBody), "fixture-provider-state")
 			require.Contains(t, string(originUpstream.lastBody), "GROUP_AND_NATIVE_SYSTEM")
+			require.Contains(t, string(originUpstream.lastBody), "Additional project context.")
 			require.Contains(t, string(originUpstream.lastBody), "9007199254740993")
 			require.NotContains(t, string(originUpstream.lastBody), apicompat.ResponsesHistoryBlockType)
 		})

@@ -10,10 +10,16 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/google/uuid"
 )
+
+// A reservation is an estimate for work still in flight, not a debit. Report
+// temporary contention separately from an exhausted authoritative balance.
+var ErrInflightBalanceBusy = infraerrors.TooManyRequests("INFLIGHT_BALANCE_BUSY",
+	"部分余额正被进行中的请求预留，请等待这些请求完成后重试。 Balance is reserved by in-flight requests. Please retry after they complete.")
 
 // InflightBalanceReservationCache 余额在途预留的缓存能力（可选）。
 // BillingCache 的 Redis 实现同时实现此接口；未实现时在途预留自动关闭（fail-open）。
@@ -252,7 +258,8 @@ func (s *BillingCacheService) ReserveInflightBalance(ctx context.Context, user *
 //
 // 以下情况直接放行且不登记预留（fail-open，保持旧行为）：
 // 开关关闭 / 简易模式 / 订阅模式 / estimate <= 0 / 缓存不支持 / 余额读取失败 / Redis 执行失败。
-// 仅当 Redis 明确判定 缓存余额 - 在途合计 < estimate（且已有在途请求）时返回 ErrInsufficientBalance。
+// Redis 判定余额不足以覆盖已有预留和 estimate 时，先回源数据库复核并原子重试一次；
+// 真实余额耗尽返回 ErrInsufficientBalance，临时预留占用返回 ErrInflightBalanceBusy。
 func (s *BillingCacheService) ReserveInflight(ctx context.Context, user *User, group *Group, subscription *UserSubscription, estimate float64) (*InflightReservation, error) {
 	return s.reserveInflight(ctx, user, group, subscription, estimate, true, true)
 }
@@ -335,8 +342,40 @@ func (s *BillingCacheService) reserveInflight(ctx context.Context, user *User, g
 		return nil, nil
 	}
 	if !allowed {
-		logger.LegacyPrintf("service.billing_cache", "inflight reservation rejected: user=%d balance=%.6f inflight=%.6f estimate=%.6f", user.ID, balance, inflight, estimate)
-		return nil, ErrInsufficientBalance
+		cachedBalance := balance
+		balance, err = s.recheckRejectedBalance(ctx, user.ID, cachedBalance)
+		if err != nil {
+			return nil, ErrBillingServiceUnavailable.WithCause(err)
+		}
+		if s.balanceBelowEligibilityThreshold(balance) || !capped && balance < estimate {
+			return nil, ErrInsufficientBalance.WithMetadata(map[string]string{
+				"stage":              "inflight-balance-recheck",
+				"user_id":            strconv.FormatInt(user.ID, 10),
+				"cached_balance_usd": strconv.FormatFloat(cachedBalance, 'f', -1, 64),
+				"balance_usd":        strconv.FormatFloat(balance, 'f', -1, 64),
+			})
+		}
+		if s.userRepo != nil {
+			// The first attempt did not register this ID. Reusing it is safe and
+			// preserves the same atomic concurrency guard with the fresh balance.
+			reserveCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), inflightReservationReserveTimeout)
+			allowed, inflight, err = rc.ReserveInflightBalance(reserveCtx, user.ID, requestID, estimate, balance, ttl)
+			cancel()
+			if err != nil {
+				return nil, ErrBillingServiceUnavailable.WithCause(err)
+			}
+		}
+		if !allowed {
+			logger.LegacyPrintf("service.billing_cache", "inflight reservation busy: user=%d cached_balance=%.6f balance=%.6f inflight=%.6f estimate=%.6f", user.ID, cachedBalance, balance, inflight, estimate)
+			return nil, ErrInflightBalanceBusy.WithMetadata(map[string]string{
+				"stage":              "inflight-reservation",
+				"user_id":            strconv.FormatInt(user.ID, 10),
+				"cached_balance_usd": strconv.FormatFloat(cachedBalance, 'f', -1, 64),
+				"balance_usd":        strconv.FormatFloat(balance, 'f', -1, 64),
+				"reserved_usd":       strconv.FormatFloat(inflight, 'f', -1, 64),
+				"estimated_usd":      strconv.FormatFloat(estimate, 'f', -1, 64),
+			})
+		}
 	}
 
 	r := &InflightReservation{cache: rc, userID: user.ID, requestID: requestID, amount: estimate, ttl: ttl}

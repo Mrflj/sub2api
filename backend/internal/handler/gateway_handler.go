@@ -2451,6 +2451,9 @@ func extractQuotaResetSeconds(err error) int {
 }
 
 func billingErrorDetails(err error) (status int, code, message string, retryAfter int) {
+	if errors.Is(err, service.ErrInflightBalanceBusy) {
+		return http.StatusTooManyRequests, "rate_limit_exceeded", pkgerrors.Message(err), 5
+	}
 	if errors.Is(err, service.ErrBillingServiceUnavailable) {
 		msg := pkgerrors.Message(err)
 		if msg == "" {

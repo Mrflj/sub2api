@@ -78,7 +78,8 @@ func TestReserveInflightBalance_UnpricedFailOpenByDefaultFailClosedOptIn(t *test
 
 	cfg.Billing.InflightReservation.FailClosedOnUnpriced = true
 	_, err = reserveInflightBalance(newInflightTestGinContext(), billing, est, apiKey, nil, tokenInflightEstimate("unknown", nil))
-	require.ErrorIs(t, err, service.ErrInsufficientBalance)
+	require.ErrorIs(t, err, service.ErrBillingServiceUnavailable)
+	require.NotErrorIs(t, err, service.ErrInsufficientBalance)
 }
 
 // handlerInflightCache 内存版余额缓存 + 在途预留（语义同 Redis Lua）。
@@ -198,7 +199,10 @@ func TestWebSearch_RejectsWhenInflightExceedsBalance(t *testing.T) {
 
 	h.WebSearch(c)
 
-	require.NotEqual(t, http.StatusOK, w.Code)
-	require.Contains(t, w.Body.String(), "balance")
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "5", w.Header().Get("Retry-After"))
+	require.Contains(t, w.Body.String(), "rate_limit_exceeded")
+	require.Contains(t, w.Body.String(), "预留")
+	require.NotContains(t, w.Body.String(), "充值")
 	require.Equal(t, 1, cache.count(), "rejected request must not leave a reservation behind")
 }

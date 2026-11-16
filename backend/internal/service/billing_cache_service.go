@@ -374,6 +374,37 @@ func (s *BillingCacheService) getUserBalanceFromDB(ctx context.Context, userID i
 	return user.Balance, nil
 }
 
+// recheckRejectedBalance verifies a negative admission decision against the
+// database. Cached balances can lag a recharge or contain a late cache write;
+// neither an auth snapshot nor Redis is authoritative when rejecting money.
+// Only the rejection path pays for this read, coalesced per user. Invalidate a
+// stale value instead of publishing another potentially racing balance SET.
+func (s *BillingCacheService) recheckRejectedBalance(ctx context.Context, userID int64, cachedBalance float64) (float64, error) {
+	if s.userRepo == nil {
+		return cachedBalance, nil
+	}
+	value, err, _ := s.balanceLoadSF.Do("recheck:"+strconv.FormatInt(userID, 10), func() (any, error) {
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), balanceLoadTimeout)
+		defer cancel()
+		balance, err := s.getUserBalanceFromDB(loadCtx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if balance != cachedBalance {
+			_ = s.InvalidateUserBalance(loadCtx, userID)
+		}
+		return balance, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	balance, ok := value.(float64)
+	if !ok {
+		return 0, fmt.Errorf("unexpected rechecked balance type: %T", value)
+	}
+	return balance, nil
+}
+
 // setBalanceCache 设置余额缓存
 func (s *BillingCacheService) setBalanceCache(ctx context.Context, userID int64, balance float64) {
 	if s.cache == nil {
@@ -1077,13 +1108,30 @@ func (s *BillingCacheService) checkBalanceEligibility(ctx context.Context, user 
 				return ErrBillingServiceUnavailable.WithCause(recoveryErr)
 			}
 			if fresh.IsActive() && !s.balanceBelowEligibilityThreshold(fresh.Balance) {
+				if fresh.Balance != balance && !result.Issued {
+					_ = s.InvalidateUserBalance(ctx, userID)
+				}
+				return nil
+			}
+			balance = fresh.Balance
+		} else {
+			balance, err = s.recheckRejectedBalance(ctx, userID, balance)
+			if err != nil {
+				return ErrBillingServiceUnavailable.WithCause(err)
+			}
+			if !s.balanceBelowEligibilityThreshold(balance) {
 				return nil
 			}
 		}
 		if s.balanceRejectionNotifier != nil {
 			s.balanceRejectionNotifier.CheckBalanceOnRejection(user, balance)
 		}
-		return ErrInsufficientBalance
+		return ErrInsufficientBalance.WithMetadata(map[string]string{
+			"stage":               "balance-eligibility",
+			"user_id":             strconv.FormatInt(userID, 10),
+			"balance_usd":         strconv.FormatFloat(balance, 'f', -1, 64),
+			"minimum_reserve_usd": strconv.FormatFloat(s.minimumBalanceReserve(), 'f', -1, 64),
+		})
 	}
 
 	return nil
