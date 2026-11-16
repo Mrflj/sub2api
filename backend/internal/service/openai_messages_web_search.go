@@ -54,7 +54,9 @@ func (s *OpenAIGatewayService) forwardMessagesWebSearch(ctx context.Context, c *
 	}
 	conversionInput := inbound
 	conversionInput.Model = normalizeOpenAIModelForUpstream(account, account.GetMappedModel(model))
-	converted, err := apicompat.AnthropicToResponsesWithMinOutputTokens(&conversionInput, configuredMinOutputTokens(s.cfg))
+	converted, err := apicompat.AnthropicToResponsesWithOptions(&conversionInput, apicompat.AnthropicToResponsesOptions{
+		MinOutputTokens: configuredMinOutputTokens(s.cfg), StopSequencesHandledLocally: true,
+	})
 	if err != nil {
 		writeMessagesWebSearchError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("convert messages web search: %w", err)
@@ -122,10 +124,15 @@ func (s *OpenAIGatewayService) forwardMessagesWebSearch(ctx context.Context, c *
 		if err != nil {
 			return err
 		}
+		stopWriter, restoreWriter := installAnthropicStopSequenceWriter(c, inbound.StopSeqs, inbound.Stream)
+		defer restoreWriter()
 		if inbound.Stream {
 			_, err = writeWebSearchStreamResponseWithText(c, query, response, clientModel, start, output)
 		} else {
 			_, err = writeWebSearchNonStreamResponseWithText(c, query, response, clientModel, start, output)
+		}
+		if err == nil {
+			err = stopWriter.finish()
 		}
 		return err
 	}
