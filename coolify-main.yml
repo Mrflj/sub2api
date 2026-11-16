@@ -1,0 +1,14 @@
+services:
+  sub2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      AUTO_SETUP: "false"
+      SERVER_HOST: "127.0.0.1"
+      SERVER_PORT: "8898"
+      SERVER_MODE: "release"
+    volumes:
+      - /opt/sub2api-docker-migration/backup-20261114-225158/candidate-data:/app/data
