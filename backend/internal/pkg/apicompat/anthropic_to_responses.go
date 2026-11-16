@@ -29,17 +29,24 @@ type AnthropicToResponsesOptions struct {
 	MinOutputTokens                int
 	DeferReasoningEffortValidation bool
 	ResponsesHistoryScope          string
+	// The caller must enforce stop sequences on the converted response.
+	StopSequencesHandledLocally bool
 }
 
 func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToResponsesOptions) (*ResponsesRequest, error) {
 	if err := validateAnthropicRequestMedia(req, "responses"); err != nil {
 		return nil, err
 	}
-	if req.TopK != nil {
-		return nil, unsupportedRequestConversion("top_k has no equivalent in Responses; use a native Messages endpoint to retain this generation control")
-	}
-	if len(req.StopSeqs) > 0 {
+	// Compatibility mode omits top_k because Responses has no equivalent.
+	if len(req.StopSeqs) > 0 && !options.StopSequencesHandledLocally {
 		return nil, unsupportedRequestConversion("stop_sequences has no equivalent in Responses; use a native Messages or Chat Completions endpoint to retain this generation control")
+	}
+	if options.StopSequencesHandledLocally {
+		for _, stop := range req.StopSeqs {
+			if stop == "" {
+				return nil, unsupportedRequestConversion("stop_sequences must contain non-empty strings")
+			}
+		}
 	}
 	if !options.DeferReasoningEffortValidation {
 		if err := openai.ValidateGPT61ReasoningEffort(req.Model, anthropicReasoningEffort(req)); err != nil {

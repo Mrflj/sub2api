@@ -52,9 +52,7 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 	if err := validateAnthropicRequestMedia(req, "chat"); err != nil {
 		return nil, err
 	}
-	if req.TopK != nil {
-		return nil, unsupportedRequestConversion("top_k has no equivalent in Chat Completions; use a native Messages endpoint to retain this generation control")
-	}
+	// Compatibility mode omits top_k because Chat Completions has no equivalent.
 
 	messages, err := anthropicToChatMessages(req.System, req.Messages)
 	if err != nil {

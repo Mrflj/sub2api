@@ -93,18 +93,28 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 		proxyURL = account.Proxy.URL()
 	}
 
-	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, clientStream)
-	upstreamReq, forwardedBody, err := s.buildNativeAnthropicUpstreamRequest(upstreamCtx, c, account, body, apiKey, targetURL)
-	releaseUpstreamCtx()
+	var buildErr error
+	resp, localStopSequences, err := doAnthropicStopSequenceCompatibleRequest(ctx, c, account, body, func(body []byte) (*http.Response, error) {
+		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, clientStream)
+		upstreamReq, forwardedBody, err := s.buildNativeAnthropicUpstreamRequest(upstreamCtx, c, account, body, apiKey, targetURL)
+		releaseUpstreamCtx()
+		if err != nil {
+			buildErr = err
+			return nil, err
+		}
+		if err := s.checkAPIKeyLongContextBeforeSend(ctx, c, forwardedBody, upstreamModel); err != nil {
+			buildErr = err
+			return nil, err
+		}
+		return s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	})
 	if err != nil {
-		return nil, err
-	}
-
-	if err := s.checkAPIKeyLongContextBeforeSend(ctx, c, forwardedBody, upstreamModel); err != nil {
-		return nil, err
-	}
-	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
-	if err != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		if buildErr != nil {
+			return nil, buildErr
+		}
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, true)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -119,10 +129,18 @@ func (s *OpenAIGatewayService) forwardAnthropicViaNativeAnthropicEndpoint(
 		return s.handleAnthropicErrorResponse(resp, c, account, billingModel)
 	}
 
+	stopWriter, restoreWriter := installAnthropicStopSequenceWriter(c, localStopSequences, clientStream)
+	defer restoreWriter()
+	var result *OpenAIForwardResult
 	if clientStream {
-		return s.handleNativeAnthropicStreamingResponse(ctx, resp, c, account, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
+		result, err = s.handleNativeAnthropicStreamingResponse(ctx, resp, c, account, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
+	} else {
+		result, err = s.handleNativeAnthropicBufferedResponse(ctx, resp, c, account, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
 	}
-	return s.handleNativeAnthropicBufferedResponse(ctx, resp, c, account, originalModel, billingModel, upstreamModel, reasoningEffort, startTime)
+	if err == nil && (result == nil || !result.ClientDisconnect) {
+		err = stopWriter.finish()
+	}
+	return result, err
 }
 
 // nativeAnthropicTargetURL 组装国产供应商原生 Anthropic messages 端点。

@@ -186,6 +186,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		MinOutputTokens:                configuredMinOutputTokens(s.cfg),
 		DeferReasoningEffortValidation: true,
 		ResponsesHistoryScope:          openAIMessagesResponseHistoryScope(c, account, billingModel),
+		StopSequencesHandledLocally:    true,
 	})
 	if err != nil {
 		if apicompat.IsUnsupportedRequestConversion(err) {
@@ -556,6 +557,8 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 
 	// 9. Handle normal response
 	// Upstream is always streaming; choose response format based on client preference.
+	stopWriter, restoreWriter := installAnthropicStopSequenceWriter(c, anthropicReq.StopSeqs, clientStream)
+	defer restoreWriter()
 	var result *OpenAIForwardResult
 	var handleErr error
 	if clientStream {
@@ -563,6 +566,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 	} else {
 		// Client wants JSON: buffer the streaming response and assemble a JSON reply.
 		result, handleErr = s.handleAnthropicBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+	}
+	if handleErr == nil && (result == nil || !result.ClientDisconnect) {
+		handleErr = stopWriter.finish()
 	}
 
 	// cyber_policy：标记已设、error 已按 Anthropic 格式发给客户端。丢弃 result、返回哨兵，

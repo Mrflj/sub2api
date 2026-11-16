@@ -94,27 +94,46 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	}
 
 	var resp *http.Response
+	var localStopSequences []string
 	retryStart := time.Now()
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
-		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, input.RequestStream)
-		upstreamReq, wireBody, err := s.buildUpstreamRequestAnthropicAPIKeyPassthrough(upstreamCtx, c, account, input.Body, token)
-		releaseUpstreamCtx()
-		if err != nil {
-			return nil, err
-		}
-		if input.Parsed != nil && !bytes.Equal(wireBody, input.Body) {
-			// build 阶段会按 beta 能力清理 body，发送前同步到 ParsedRequest 当前视图。
-			if err := input.Parsed.ReplaceBody(wireBody); err != nil {
-				return nil, err
+		var upstreamReq *http.Request
+		var lastWireBody []byte
+		var buildErr error
+		var stops []string
+		resp, stops, err = doAnthropicStopSequenceCompatibleRequest(ctx, c, account, input.Body, func(body []byte) (*http.Response, error) {
+			upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, input.RequestStream)
+			var wireBody []byte
+			upstreamReq, wireBody, buildErr = s.buildUpstreamRequestAnthropicAPIKeyPassthrough(upstreamCtx, c, account, body, token)
+			releaseUpstreamCtx()
+			if buildErr != nil {
+				return nil, buildErr
 			}
-			input.Body = input.Parsed.Body.Bytes()
+			lastWireBody = wireBody
+			if input.Parsed != nil && !bytes.Equal(wireBody, input.Body) {
+				// Keep usage hashing aligned with the actual wire request.
+				if buildErr = input.Parsed.ReplaceBody(wireBody); buildErr != nil {
+					return nil, buildErr
+				}
+				input.Body = input.Parsed.Body.Bytes()
+			}
+			response, sendErr := s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+			s.rateLimitService.observeQualityResponse(upstreamReq.Context(), account, response, sendErr)
+			return response, sendErr
+		})
+		if len(stops) > 0 {
+			localStopSequences = stops
+			input.Body = lastWireBody
 		}
-
-		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
-		s.rateLimitService.observeQualityResponse(upstreamReq.Context(), account, resp, err)
+		if len(lastWireBody) > 0 && gjson.GetBytes(input.Body, "top_k").Exists() && !gjson.GetBytes(lastWireBody, "top_k").Exists() {
+			input.Body = lastWireBody
+		}
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
+			}
+			if buildErr != nil {
+				return nil, buildErr
 			}
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err, OpsUpstreamErrorEvent{
 				UpstreamURL: safeUpstreamURL(upstreamReq.URL.String()),
@@ -125,7 +144,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 			return handleAnthropicRequestTooLarge(c, resp)
 		}
 
-		// 透传分支禁止 400 请求体降级重试（该重试会改写请求体）
+		// Other 400 errors retain the existing passthrough behavior.
 		if resp.StatusCode >= 400 && resp.StatusCode != 400 && s.shouldRetryUpstreamError(account, resp.StatusCode) {
 			if attempt < maxRetryAttempts {
 				elapsed := time.Since(retryStart)
@@ -255,6 +274,8 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 		return s.handleErrorResponse(ctx, resp, c, account, input.RequestModel)
 	}
 
+	stopWriter, restoreWriter := installAnthropicStopSequenceWriter(c, localStopSequences, input.RequestStream)
+	defer restoreWriter()
 	var usage *ClaudeUsage
 	var firstTokenMs *int
 	var clientDisconnect bool
@@ -280,6 +301,10 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 	if usage == nil {
 		usage = &ClaudeUsage{}
 	}
+	var finishErr error
+	if !clientDisconnect {
+		finishErr = stopWriter.finish()
+	}
 
 	return &ForwardResult{
 		RequestID:                     resp.Header.Get("x-request-id"),
@@ -294,7 +319,7 @@ func (s *GatewayService) forwardAnthropicAPIKeyPassthroughWithInput(
 		Duration:                      time.Since(input.StartTime),
 		FirstTokenMs:                  firstTokenMs,
 		ClientDisconnect:              clientDisconnect,
-	}, nil
+	}, finishErr
 }
 
 func (s *GatewayService) buildUpstreamRequestAnthropicAPIKeyPassthrough(
