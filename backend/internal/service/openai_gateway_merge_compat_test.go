@@ -84,6 +84,8 @@ func TestGroupPrompt400RecoveryPreservesMappedInstructions(t *testing.T) {
 					if after409 {
 						r := openAIAgentRecoveryFromContext(ctx)
 						r.omittedHistory, r.inputDigest = true, openAIAgentRecoveryInputDigest(body)
+						r.replaySource = append([]byte(nil), body...)
+						r.replayControlsDigest = openAI409ControlsDigest(body)
 					}
 					c.Request = c.Request.WithContext(ctx)
 					_, err = svc.Forward(ctx, c, account, body)

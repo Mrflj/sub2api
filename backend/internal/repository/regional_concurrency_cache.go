@@ -94,8 +94,20 @@ func (c *regionalConcurrencyCache) GetUserConcurrency(ctx context.Context, id in
 	if err != nil {
 		return 0, err
 	}
-	stats, err := c.ConcurrencyCache.GetUserConcurrency(ctx, id)
-	return n + stats, err
+	tracked, err := c.ConcurrencyCache.GetUserConcurrency(ctx, id)
+	return n + tracked, err
+}
+func (c *regionalConcurrencyCache) TrackUserSlot(ctx context.Context, id int64, request string) error {
+	if tracker, ok := c.ConcurrencyCache.(service.UserSlotTracker); ok {
+		return tracker.TrackUserSlot(ctx, id, request)
+	}
+	return errors.New("user slot tracking unavailable")
+}
+func (c *regionalConcurrencyCache) ReleaseTrackedUserSlot(ctx context.Context, id int64, request string) error {
+	if tracker, ok := c.ConcurrencyCache.(service.UserSlotTracker); ok {
+		return tracker.ReleaseTrackedUserSlot(ctx, id, request)
+	}
+	return nil
 }
 func (c *regionalConcurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, ids []int64) (map[int64]int, error) {
 	return c.counts(ctx, "account", ids)
@@ -199,8 +211,8 @@ func (c *regionalConcurrencyCache) GetAccountsLoadBatch(ctx context.Context, acc
 	return out, nil
 }
 func (c *regionalConcurrencyCache) GetUsersLoadBatch(ctx context.Context, users []service.UserWithConcurrency) (map[int64]*service.UserLoadInfo, error) {
-	// Redis contains queue information and unlimited-user activity. Limited user
-	// admission stays in SQL; sum both so changing a limit cannot hide old slots.
+	// Redis contains unlimited-user statistics and local queues; add the
+	// authoritative persistent budget without re-reading Redis per user.
 	out, err := c.ConcurrencyCache.GetUsersLoadBatch(ctx, users)
 	if err != nil {
 		return nil, err
@@ -213,7 +225,8 @@ func (c *regionalConcurrencyCache) GetUsersLoadBatch(ctx context.Context, users 
 		if out[u.ID] == nil {
 			out[u.ID] = &service.UserLoadInfo{UserID: u.ID}
 		}
-		out[u.ID].CurrentConcurrency += n
+		n += out[u.ID].CurrentConcurrency
+		out[u.ID].CurrentConcurrency = n
 		if u.MaxConcurrency > 0 {
 			out[u.ID].LoadRate = (out[u.ID].CurrentConcurrency + out[u.ID].WaitingCount) * 100 / u.MaxConcurrency
 		}

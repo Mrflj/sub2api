@@ -144,6 +144,43 @@ func TestCCFallbackStreamPreOutputFailuresRemainRetryableAndPrivate(t *testing.T
 	}
 }
 
+func TestCCFallbackMultilineFailurePreservesPoolRetryAndUsage(t *testing.T) {
+	for _, endpoint := range []string{"messages", "responses"} {
+		for _, eventHeader := range []string{"", "event: error\n"} {
+			t.Run(endpoint+"/"+eventHeader, func(t *testing.T) {
+				account := forceChatMessagesFallbackAccount()
+				for key, value := range newConfiguredStreamRetryAccount().Credentials {
+					account.Credentials[key] = value
+				}
+				failure := eventHeader + "data: {\"error\":\ndata: {\"type\":\"server_error\",\"code\":\"bps_stream_error\",\"message\":\"fixture upstream failed\"},\ndata: \"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"
+				body := &poolTCPResetBody{Reader: strings.NewReader(ccCompletionSSE([]string{ccCompletionPreamble}, false) + failure), err: poolTCPReadReset()}
+				rec, c, _, result, err := runCCCompletionFixture(t, endpoint, account, body, context.Background())
+				var retry *UpstreamFailoverError
+				require.ErrorAs(t, err, &retry)
+				require.True(t, retry.RetryableOnSameAccount)
+				require.Nil(t, retry.TransportFailure, "a complete semantic error takes precedence over a later reset")
+				require.Equal(t, http.StatusBadGateway, retry.StatusCode)
+				require.Equal(t, 7, result.Usage.InputTokens)
+				require.Equal(t, 2, result.Usage.OutputTokens)
+				require.Empty(t, rec.Body.String())
+				require.False(t, c.Writer.Written())
+			})
+		}
+	}
+}
+
+func TestNativeSemanticFailurePreservesClientModelPrivacy(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Writer.WriteHeaderNow()
+	payload := []byte(`{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"reasoning.effort","message":"private-upstream-model does not support reasoning effort minimal"}}`)
+	require.Error(t, writeNativeAnthropicSemanticFailure(c, payload, "public-model"))
+	require.Contains(t, rec.Body.String(), `"model":"public-model"`)
+	require.Contains(t, rec.Body.String(), "unsupported_value")
+	require.NotContains(t, rec.Body.String(), "private-upstream-model")
+}
+
 func TestCCFallbackStreamDoneWithoutFinishDoesNotSucceed(t *testing.T) {
 	for _, endpoint := range []string{"messages", "responses"} {
 		t.Run(endpoint, func(t *testing.T) {

@@ -73,7 +73,7 @@ func (w *ccStreamWriteState) write(c *gin.Context, headers func(), data string, 
 // Once bytes have reached a client, report an endpoint-native error only: never
 // finalize a tool or return a replayable account-switch error for that attempt.
 func (s *OpenAIGatewayService) handleCCStreamScanError(
-	c *gin.Context, account *Account, resp *http.Response, upstreamModel string,
+	c *gin.Context, account *Account, resp *http.Response, upstreamModel, clientModel string,
 	cause error, disconnected bool, writeHTTP compatErrorWriter,
 	writeSSE func([]byte, string),
 ) error {
@@ -116,6 +116,9 @@ func (s *OpenAIGatewayService) handleCCStreamScanError(
 	requestID := resp.Header.Get("x-request-id")
 	if retryEligible && !disconnected && !c.Writer.Written() && shouldFailover {
 		return s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header)
+	}
+	if semantic != nil && !disconnected && !openAIStreamClientCanceled(c) {
+		return writeNativeAnthropicSemanticFailure(c, payload, openAIClientResponseModel(c, clientModel))
 	}
 	message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payload, message)
 	if !disconnected && !openAIStreamClientCanceled(c) {

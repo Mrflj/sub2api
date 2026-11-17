@@ -57,6 +57,7 @@ func (s *OpenAIGatewayService) releaseDisabledOpenAIAgentOwner(ctx context.Conte
 	request.releasedOwnerID = ownerID
 	request.owner = nil
 	request.known = nil
+	request.previousResponseID = ""
 	logger.FromContext(ctx).Info("openai.agent_recovery_owner_released",
 		zap.Int64("original_account_id", ownerID),
 		zap.String("reason", "account_disabled"),

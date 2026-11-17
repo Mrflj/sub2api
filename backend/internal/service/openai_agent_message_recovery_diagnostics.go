@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"go.uber.org/zap"
 )
 
@@ -21,8 +20,18 @@ func (r *openAIAgentRecoveryRequest) refusal(reason, stage, detail string) *Open
 // LogRefusal records only routing diagnostics, never request bodies, opaque
 // item identities, session identifiers, credentials or credential hashes.
 func (e *OpenAIAgentRecoveryError) LogRefusal(ctx context.Context) {
+	LogOpenAIAgentRecoveryRefusal(ctx, e)
+}
+
+func (e *OpenAIAgentRecoveryError) refusalLogFields(ctx context.Context) []zap.Field {
+	if e == nil {
+		return nil
+	}
 	originalID := e.OriginalAccountID
 	stage, reason := e.RejectionStage, e.RejectionReason
+	if reason == "" && e.diagnostic != nil {
+		reason = e.diagnostic.subreason
+	}
 	if stage == "" {
 		stage = "recovery_check"
 	}
@@ -59,7 +68,7 @@ func (e *OpenAIAgentRecoveryError) LogRefusal(ctx context.Context) {
 	if !e.RetryAt.IsZero() {
 		fields = append(fields, zap.Time("retry_at", e.RetryAt))
 	}
-	logger.FromContext(ctx).Warn("openai.agent_recovery_refused", fields...)
+	return fields
 }
 
 // Called only after the existing admission check has rejected the account.

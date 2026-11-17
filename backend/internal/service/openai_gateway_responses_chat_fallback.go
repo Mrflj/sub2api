@@ -357,7 +357,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsResponses(
 	}
 
 	if scan.Err != nil {
-		streamErr := s.handleCCStreamScanError(c, account, resp, upstreamModel, scan.Err, output.disconnected, writeOpenAIResponsesFallbackError, func(payload []byte, message string) {
+		streamErr := s.handleCCStreamScanError(c, account, resp, upstreamModel, originalModel, scan.Err, output.disconnected, writeOpenAIResponsesFallbackError, func(payload []byte, message string) {
 			_, _ = fmt.Fprint(c.Writer, buildOpenAIResponseFailedSSE(state.ResponseID, originalModel, state.Created, payload, message))
 			c.Writer.Flush()
 		})
