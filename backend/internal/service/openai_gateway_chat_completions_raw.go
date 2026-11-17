@@ -533,7 +533,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		return resultWithUsage(), errors.New("upstream response failed")
 	}
 	if !clientAborted && !terminal.Terminated() {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, scanErr); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, scanErr); handled {
 			return resultWithUsage(), resetErr
 		}
 	}
@@ -645,7 +645,7 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err); handled {
 			return nil, resetErr
 		}
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {

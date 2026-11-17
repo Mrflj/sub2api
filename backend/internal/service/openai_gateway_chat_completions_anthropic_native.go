@@ -216,7 +216,7 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -235,7 +235,7 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -486,7 +486,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -504,7 +504,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			// EOF / 读错误：事件行后流终止，进入 finalize。
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}

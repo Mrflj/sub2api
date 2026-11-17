@@ -640,7 +640,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			if upstreamCtx.Err() != nil {
 				return nil, context.Cause(upstreamCtx)
 			}
-			if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, "", err, writeClientMessage); handled {
+			if resetErr, handled := handleOpenAIStreamTransportReset(c, account, "", err, writeClientMessage); handled {
 				return nil, resetErr
 			}
 			if turn == 1 && !strictSession {
@@ -1136,7 +1136,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			return resultWithUsage(), context.Cause(upstreamCtx)
 		}
 		if !clientDisconnected {
-			if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err, writeClientMessage); handled {
+			if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err, writeClientMessage); handled {
 				upstreamTerminalEvent = "response.failed"
 				return resultWithUsage(), resetErr
 			}

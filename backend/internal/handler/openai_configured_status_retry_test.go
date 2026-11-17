@@ -296,7 +296,8 @@ data: {"response":{"created_at":1793884529,"error":{"code":"bps_stream_error","m
 		noReplay    bool
 	}{
 		{name: "unexpected_eof_ten", err: io.ErrUnexpectedEOF, retries: 10, fallback: true},
-		{name: "http2_protocol_error", err: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer"), retries: 2, fallback: true, noReplay: true},
+		{name: "http2_protocol_error", err: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer"), retries: 2},
+		{name: "http2_non_pool", err: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer"), retries: 2, disablePool: true, fallback: true, noReplay: true},
 		{name: "transport_502_not_configured", err: io.ErrUnexpectedEOF, retries: 10, retryStatus: http.StatusServiceUnavailable},
 		{name: "transport_retry_disabled", err: io.ErrUnexpectedEOF},
 		{name: "transport_non_pool", err: io.ErrUnexpectedEOF, retries: 10, disablePool: true},
@@ -441,8 +442,9 @@ data: {"response":{"created_at":1793884529,"error":{"code":"bps_stream_error","m
 						}
 					}
 					require.Equal(t, wantCalls, calls, "configured retries must honor the submitted-request replay boundary")
-					if tt.noReplay {
-						assertConfiguredRetryHTTP2NoReplay(t, c, rec, queueHeartbeat)
+					peerReset := tt.transportErr != nil && strings.Contains(tt.transportErr.Error(), "received from peer")
+					if peerReset {
+						assertConfiguredRetryHTTP2Terminal(t, c, rec, queueHeartbeat)
 					}
 					if tt.bodyLimitFirst {
 						require.NotContains(t, rec.Body.String(), "response.created", "failed attempt metadata must stay buffered")
@@ -461,7 +463,7 @@ data: {"response":{"created_at":1793884529,"error":{"code":"bps_stream_error","m
 						if tt.transportErr != nil {
 							kind, status, requestID = "request_error", 0, ""
 						}
-						if tt.noReplay {
+						if peerReset {
 							kind, status, requestID = "transport_error", 0, ""
 						}
 						require.Equal(t, kind, event.Kind)
@@ -478,9 +480,9 @@ data: {"response":{"created_at":1793884529,"error":{"code":"bps_stream_error","m
 	}
 }
 
-// A verified peer reset may follow a consumed POST, so configured 502 retries
-// must stop before replaying either this account or a fallback account.
-func assertConfiguredRetryHTTP2NoReplay(t *testing.T, c *gin.Context, rec *httptest.ResponseRecorder, heartbeat bool) {
+// A terminal peer reset must preserve its transport classification after the
+// configured pool budget is exhausted, or immediately for non-pool accounts.
+func assertConfiguredRetryHTTP2Terminal(t *testing.T, c *gin.Context, rec *httptest.ResponseRecorder, heartbeat bool) {
 	t.Helper()
 	if heartbeat {
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -507,7 +509,7 @@ func assertConfiguredRetryHTTP2NoReplay(t *testing.T, c *gin.Context, rec *httpt
 func TestOpenAIMessagesConfiguredStatusRetriesSameAccount(t *testing.T) {
 	for _, test := range []messagesRetryCase{
 		{name: "transport_unexpected_eof_ten", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 11, transportErr: io.ErrUnexpectedEOF},
-		{name: "transport_http2_no_replay", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 1, successAfter: 2, noReplay: true, transportErr: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer")},
+		{name: "transport_http2_recovers_after_two", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 3, successAfter: 2, transportErr: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer")},
 		{name: "transport_502_not_configured", retries: 10, retryStatus: http.StatusServiceUnavailable, wantCalls: 1, transportErr: io.ErrUnexpectedEOF},
 		{name: "transport_retry_disabled", retryStatus: http.StatusBadGateway, wantCalls: 1, transportErr: io.ErrUnexpectedEOF},
 		{name: "configured_ten", retries: 10, retryStatus: http.StatusBadGateway, wantCalls: 11},
@@ -801,10 +803,14 @@ data: {"type":"response.completed","response":{"id":"resp_messages_success","sta
 	if test.transportErr != nil {
 		wantKind, wantStatus = "request_error", 0
 	}
+	if (test.transportErr != nil && strings.Contains(test.transportErr.Error(), "received from peer")) ||
+		(test.streamReadErr != nil && strings.Contains(test.streamReadErr.Error(), "received from peer")) {
+		wantKind, wantStatus = "transport_error", 0
+	}
 	wantEvents := test.wantCalls
 	if test.noReplay {
 		wantKind, wantStatus = "transport_error", 0
-		assertConfiguredRetryHTTP2NoReplay(t, c, rec, test.queueHeartbeat || test.streamHeartbeat)
+		assertConfiguredRetryHTTP2Terminal(t, c, rec, test.queueHeartbeat || test.streamHeartbeat)
 	} else if test.successAfter > 0 {
 		wantEvents = test.successAfter
 		require.Equal(t, http.StatusOK, rec.Code)
@@ -906,7 +912,7 @@ func TestOpenAIChatReadFailuresRetrySameAccount(t *testing.T) {
 		{name: "unexpected_eof_ten_retries", retries: 10, wantCalls: 11, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "unexpected_eof_recovers_after_two", retries: 10, wantCalls: 3, successAfter: 2, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "truncated_recovers", retries: 10, wantCalls: 2, successAfter: 1, streamReadErr: io.EOF},
-		{name: "http2_reset_no_replay", retries: 10, wantCalls: 1, successAfter: 1, noReplay: true, streamReadErr: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer")},
+		{name: "http2_reset_recovers", retries: 10, wantCalls: 2, successAfter: 1, streamReadErr: fmt.Errorf("stream error: stream ID 1; PROTOCOL_ERROR; received from peer")},
 		{name: "opaque_reasoning_recovers", retries: 10, wantCalls: 2, successAfter: 1, opaquePrelude: true, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "private_reasoning_tool_recovers", retries: 10, wantCalls: 3, successAfter: 2, partialPrelude: true, streamReadErr: io.ErrUnexpectedEOF},
 		{name: "queue_heartbeat", retries: 2, wantCalls: 3, queueHeartbeat: true, streamReadErr: io.ErrUnexpectedEOF},

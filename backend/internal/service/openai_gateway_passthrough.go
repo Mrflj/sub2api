@@ -2871,7 +2871,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			return resultWithUsage(), err
 		}
 		if !clientDisconnected && ctx.Err() == nil {
-			if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, upstreamRequestID, err); handled {
+			if resetErr, handled := handleOpenAIStreamTransportReset(c, account, upstreamRequestID, err); handled {
 				failureDelivered = true
 				return resultWithUsage(), resetErr
 			}
@@ -2952,7 +2952,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	ctx = bindOpenAI429ResponseObservation(ctx, resp, c)
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err); handled {
 			return nil, resetErr
 		}
 		return nil, err

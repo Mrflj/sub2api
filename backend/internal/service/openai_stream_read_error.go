@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -18,8 +19,9 @@ import (
 const (
 	// OpenAIUpstreamHTTP2StreamErrorCode is returned to OpenAI-compatible clients
 	// when an upstream HTTP/2 response stream is reset after the request started.
-	OpenAIUpstreamHTTP2StreamErrorCode = "upstream_http2_stream_error"
-	OpenAIUpstreamStreamReadErrorCode  = "upstream_stream_read_error"
+	OpenAIUpstreamHTTP2StreamErrorCode     = "upstream_http2_stream_error"
+	OpenAIUpstreamStreamReadErrorCode      = "upstream_stream_read_error"
+	openAIUpstreamStreamInterruptedMessage = "Upstream response stream was interrupted"
 	// OpenAIUpstreamStreamTruncatedCode is returned when an upstream SSE stream
 	// closes *cleanly* before delivering any terminal signal. A clean EOF carries
 	// no transport error, so without this classification a truncated generation is
@@ -93,7 +95,7 @@ func classifyOpenAIUpstreamStreamReadError(err error) (code, message string) {
 			return OpenAIUpstreamHTTP2StreamErrorCode, "Upstream HTTP/2 stream failed"
 		}
 	}
-	return OpenAIUpstreamStreamReadErrorCode, "Upstream response stream was interrupted"
+	return OpenAIUpstreamStreamReadErrorCode, openAIUpstreamStreamInterruptedMessage
 }
 
 // net/http uses an unexported copy of http2.StreamError. Match its complete
@@ -140,26 +142,82 @@ func openAIHTTP2PeerResetMessage(reason string) string {
 }
 
 // OpsTransportFailure is trusted local evidence, never inferred from SSE text.
-// Keeping it separate from HTTP status avoids both false success and 502 policy.
+// Keeping it separate from HTTP status preserves transport attribution when a
+// pool uses the effective 502 status for its request-local retry policy.
 type OpsTransportFailure struct {
+	Protocol    string `json:"protocol,omitempty"`
 	ResetReason string `json:"reset_reason,omitempty"`
 }
 
-func (f *OpsTransportFailure) ErrorFields() map[string]any {
-	return map[string]any{"type": "upstream_error", "code": OpenAIUpstreamHTTP2StreamErrorCode,
-		"category": "transport_error", "protocol": "HTTP/2", "reset_reason": safeHTTP2ResetReason(f.ResetReason),
-		"message": openAIHTTP2PeerResetMessage(f.ResetReason)}
+func (f *OpsTransportFailure) errorCode() string {
+	if f.Protocol == "TCP" {
+		return OpenAIUpstreamStreamReadErrorCode
+	}
+	return OpenAIUpstreamHTTP2StreamErrorCode
 }
 
-// handleOpenAIHTTP2PeerReset ends this submitted request at the read boundary.
-// The caller must discard any incomplete staged event before invoking it. A
-// typed read error (not UpstreamFailoverError) prevents account or request replay.
-func handleOpenAIHTTP2PeerReset(c *gin.Context, account *Account, requestID string, cause error, writeWSFrame ...func([]byte) error) (error, bool) {
+func (f *OpsTransportFailure) errorMessage() string {
+	if f.Protocol == "TCP" {
+		return openAIUpstreamStreamInterruptedMessage
+	}
+	return openAIHTTP2PeerResetMessage(f.ResetReason)
+}
+
+func (f *OpsTransportFailure) ErrorFields() map[string]any {
+	protocol, reason := "HTTP/2", safeHTTP2ResetReason(f.ResetReason)
+	if f.Protocol == "TCP" {
+		protocol, reason = "TCP", "CONNECTION_RESET"
+	}
+	return map[string]any{"type": "upstream_error", "code": f.errorCode(),
+		"category": "transport_error", "protocol": protocol, "reset_reason": reason,
+		"message": f.errorMessage()}
+}
+
+func openAITCPReadReset(err error) bool {
+	if !shouldClassifyOpenAIUpstreamStreamReadError(err) {
+		return false
+	}
+	var semantic *UpstreamFailoverError
+	var image *OpenAIImagesUpstreamError
+	if errors.As(err, &semantic) || errors.As(err, &image) {
+		return false
+	}
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "read" && strings.HasPrefix(op.Net, "tcp") && isOpenAITCPResetError(err)
+}
+
+func openAIStreamTransportRetryAllowed(c *gin.Context, account *Account, websocket bool) bool {
+	if websocket || c == nil || c.Request == nil || c.Request.Context().Err() != nil ||
+		GetOpenAIClientTransport(c) == OpenAIClientTransportWS || account == nil ||
+		account.Platform != PlatformOpenAI || account.Type != AccountTypeAPIKey ||
+		!openAIStreamConfiguredRetryEnabled(account) || !account.IsPoolModeRetryableStatus(http.StatusBadGateway) ||
+		IsResponseCommitted(c) || OpenAIImageGenerationIntentFromContext(c.Request.Context()) {
+		return false
+	}
+	return !strings.Contains(strings.TrimRight(c.Request.URL.Path, "/"), "/images/")
+}
+
+func openAIStreamTransportResetFailure(c *gin.Context, account *Account, cause error, websocket bool) *OpsTransportFailure {
+	if reason, ok := openAIHTTP2PeerResetReason(cause); ok {
+		return &OpsTransportFailure{ResetReason: reason}
+	}
+	// A verified TCP read reset gains only the explicitly configured pool retry
+	// path. Opt-outs and other protocols retain their existing error handling.
+	if openAITCPReadReset(cause) && openAIStreamTransportRetryAllowed(c, account, websocket) {
+		return &OpsTransportFailure{Protocol: "TCP", ResetReason: "CONNECTION_RESET"}
+	}
+	return nil
+}
+
+// handleOpenAIStreamTransportReset applies configured pool retries at the read boundary.
+// The caller must discard any incomplete staged event before invoking it.
+// Other accounts and transports retain the terminal, non-replay behavior.
+func handleOpenAIStreamTransportReset(c *gin.Context, account *Account, requestID string, cause error, writeWSFrame ...func([]byte) error) (error, bool) {
 	if c == nil || c.Request == nil || !shouldClassifyOpenAIUpstreamStreamReadError(cause, c.Request.Context()) {
 		return nil, false
 	}
-	reason, ok := openAIHTTP2PeerResetReason(cause)
-	if !ok {
+	failure := openAIStreamTransportResetFailure(c, account, cause, len(writeWSFrame) > 0)
+	if failure == nil {
 		return nil, false
 	}
 	classified := newOpenAIUpstreamStreamReadError(cause)
@@ -168,19 +226,47 @@ func handleOpenAIHTTP2PeerReset(c *gin.Context, account *Account, requestID stri
 	}
 	StopOpenAICompactSSEKeepaliveCommitted(c)
 	StopOpenAIImagesJSONKeepaliveCommitted(c)
-	failure := &OpsTransportFailure{ResetReason: reason}
-	message := openAIHTTP2PeerResetMessage(reason)
+	message := failure.errorMessage()
 	c.Set(OpsUpstreamStatusCodeKey, 0)
 	c.Set(OpsUpstreamErrorMessageKey, message)
 	c.Set(OpsUpstreamErrorDetailKey, "")
-	event := OpsUpstreamErrorEvent{Kind: "transport_error", Stage: "response_stream", Reason: reason,
+	event := OpsUpstreamErrorEvent{Kind: "transport_error", Stage: "response_stream", Reason: failure.ResetReason,
 		Message: message, UpstreamRequestID: requestID, ProxyID: opsUpstreamProxyID(account), ProxyName: opsUpstreamProxyName(account)}
 	if account != nil {
 		event.Platform, event.AccountID, event.AccountName = account.Platform, account.ID, account.Name
 	}
 	appendOpsUpstreamError(c, event)
+	if openAIStreamTransportRetryAllowed(c, account, len(writeWSFrame) > 0) {
+		return &UpstreamFailoverError{
+			StatusCode: http.StatusBadGateway, RetryableOnSameAccount: true,
+			ConfiguredStreamRetry: true, RetryAfterOutput: c.Writer.Written(),
+			RequestScopedTransient: true, NextAccountAction: NextAccountStop,
+			TransportFailure: failure,
+		}, true
+	}
+	writeOpenAIStreamTransportFailure(c, failure, writeWSFrame...)
+	return classified, true
+}
+
+// WriteOpenAIStreamTransportFailure terminates a configured pool retry only once
+// its handler budget is exhausted, preserving the original transport evidence.
+func WriteOpenAIStreamTransportFailure(c *gin.Context, failoverErr *UpstreamFailoverError) bool {
+	if c == nil || c.Request == nil || failoverErr == nil || failoverErr.TransportFailure == nil {
+		return false
+	}
+	if marked, exists := GetOpsStreamError(c); !exists || marked.TransportFailure == nil || marked.Turn != c.GetInt(OpsStreamTurnKey) {
+		writeOpenAIStreamTransportFailure(c, failoverErr.TransportFailure)
+	}
+	return true
+}
+
+func writeOpenAIStreamTransportFailure(c *gin.Context, failure *OpsTransportFailure, writeWSFrame ...func([]byte) error) {
+	message := failure.errorMessage()
+	c.Set(OpsUpstreamStatusCodeKey, 0)
+	c.Set(OpsUpstreamErrorMessageKey, message)
+	c.Set(OpsUpstreamErrorDetailKey, "")
 	MarkOpsStreamErrorValue(c, OpsStreamError{TransportFailure: failure, ErrType: "upstream_error",
-		Code: OpenAIUpstreamHTTP2StreamErrorCode, Message: message, IntendedStatus: http.StatusBadGateway, CountTowardsSLA: true,
+		Code: failure.errorCode(), Message: message, IntendedStatus: http.StatusBadGateway, CountTowardsSLA: true,
 		NonStream: len(writeWSFrame) == 0 && !c.GetBool("ops_stream") && !strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream")})
 	fields := failure.ErrorFields()
 	failedResponse := func() map[string]any {
@@ -198,10 +284,10 @@ func handleOpenAIHTTP2PeerReset(c *gin.Context, account *Account, requestID stri
 			_ = c.Error(err)
 		}
 		MarkResponseCommitted(c)
-		return classified, true
+		return
 	}
 	if GetOpenAIClientTransport(c) == OpenAIClientTransportWS {
-		return classified, true
+		return
 	}
 	if c.Writer.Written() && strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
 		eventType := "error"
@@ -229,5 +315,4 @@ func handleOpenAIHTTP2PeerReset(c *gin.Context, account *Account, requestID stri
 		c.JSON(status, payload)
 	}
 	MarkResponseCommitted(c)
-	return classified, true
 }

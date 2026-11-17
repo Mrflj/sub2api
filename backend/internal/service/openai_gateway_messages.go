@@ -658,7 +658,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	if err != nil {
 		var readErr *openAICompatBufferedReadError
 		if errors.As(err, &readErr) && readErr != nil {
-			if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, readErr.cause); handled {
+			if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, readErr.cause); handled {
 				return nil, resetErr
 			}
 			return nil, readErr.cause
@@ -1444,7 +1444,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				return resultWithUsage(), failover
 			}
 			if !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, err); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, err); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -1524,7 +1524,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					return resultWithUsage(), failover
 				}
 				if !clientDisconnected {
-					if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, ev.err); handled {
+					if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, ev.err); handled {
 						return resultWithUsage(), resetErr
 					}
 				}

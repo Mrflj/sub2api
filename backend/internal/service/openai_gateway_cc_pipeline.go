@@ -395,7 +395,7 @@ func (s *OpenAIGatewayService) scanCCStream(
 			)
 		}
 		st.Err = err
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, err); handled {
 			st.Err = resetErr
 		}
 	}
@@ -426,7 +426,7 @@ func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
 ) (*apicompat.ChatCompletionsResponse, OpenAIUsage, error) {
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err); handled {
 			return nil, OpenAIUsage{}, resetErr
 		}
 		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {

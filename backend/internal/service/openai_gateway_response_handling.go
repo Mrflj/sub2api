@@ -580,11 +580,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return resultWithUsage(), scanErr, true
 		}
 		if !clientDisconnected && ctx.Err() == nil {
-			if _, reset := openAIHTTP2PeerResetReason(scanErr); reset {
+			if reset := openAIStreamTransportResetFailure(c, account, scanErr, false); reset != nil {
 				discardIncompletePluginEvent()
 				flushPending("Client disconnected during reset flush")
 				errorEventSent = true
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, upstreamRequestID, scanErr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, upstreamRequestID, scanErr); handled {
 					return resultWithUsage(), resetErr, true
 				}
 			}
@@ -2006,7 +2006,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	ctx = bindOpenAI429ResponseObservation(ctx, resp, c)
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err); handled {
 			return nil, resetErr
 		}
 		return nil, err

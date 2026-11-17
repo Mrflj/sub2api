@@ -27,7 +27,8 @@ func TestHandleOpenAIUpstreamTransportError_ConfiguredPoolRetry(t *testing.T) {
 		peerReset  bool
 	}{
 		{name: "unexpected_eof", err: eof, pool: true, codes: []any{float64(502)}, wantRetry: true},
-		{name: "http2_protocol_error", err: h2, pool: true, codes: []any{float64(502)}, peerReset: true},
+		{name: "http2_protocol_error", err: h2, pool: true, codes: []any{float64(502)}, peerReset: true, wantRetry: true},
+		{name: "typed_tcp_read_reset", err: poolTCPReadReset(), pool: true, codes: []any{float64(502)}, peerReset: true, wantRetry: true},
 		{name: "connection_reset", err: errors.New("connection reset by peer"), pool: true, codes: []any{float64(502)}, wantRetry: true},
 		{name: "unknown_transport_error", err: errors.New("unexpected transport failure"), pool: true, codes: []any{float64(502)}, wantRetry: true},
 		{name: "upstream_timeout", err: context.DeadlineExceeded, pool: true, codes: []any{float64(502)}, wantRetry: true},
@@ -55,17 +56,21 @@ func TestHandleOpenAIUpstreamTransportError_ConfiguredPoolRetry(t *testing.T) {
 				err := svc.handleOpenAIUpstreamTransportError(context.Background(), c, account, tt.err, passthrough)
 				var failover *UpstreamFailoverError
 				if tt.peerReset {
-					require.NotErrorAs(t, err, &failover)
-					code, _, classified := OpenAIUpstreamStreamReadErrorDetails(err)
-					require.True(t, classified)
-					require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
-					require.Equal(t, http.StatusBadGateway, rec.Code)
-					require.Contains(t, rec.Body.String(), "Do not automatically retry")
+					require.ErrorAs(t, err, &failover)
+					require.True(t, failover.RetryableOnSameAccount)
+					require.False(t, failover.ShouldRetryNextAccount())
+					require.NotNil(t, failover.TransportFailure)
+					require.Empty(t, rec.Body.String())
 					require.Empty(t, repo.tempUnschedCalls)
 					require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
-					ops, marked := GetOpsStreamError(c)
-					require.True(t, marked)
-					require.NotNil(t, ops.TransportFailure)
+					_, marked := GetOpsStreamError(c)
+					require.False(t, marked)
+					value, exists := c.Get(OpsUpstreamErrorsKey)
+					require.True(t, exists)
+					events := value.([]*OpsUpstreamErrorEvent)
+					require.Len(t, events, 1)
+					require.Equal(t, "transport_error", events[0].Kind)
+					require.Zero(t, events[0].UpstreamStatusCode)
 					continue
 				}
 				require.ErrorAs(t, err, &failover)

@@ -111,7 +111,7 @@ func ToUserErrorRequest(e *OpsErrorLog) *UserErrorRequest {
 		clientIP = *e.ClientIP
 	}
 	message := e.Message
-	if e.Type == "transport_error" {
+	if e.Type == "transport_error" && message != openAIUpstreamStreamInterruptedMessage {
 		message = openAIHTTP2PeerResetMessage("")
 	}
 	return &UserErrorRequest{
@@ -152,13 +152,19 @@ func ToUserErrorRequestDetail(e *OpsErrorLogDetail) *UserErrorRequestDetail {
 	if e.Type == "transport_error" {
 		var envelope struct {
 			Error struct {
+				Code        string `json:"code"`
+				Protocol    string `json:"protocol"`
 				ResetReason string `json:"reset_reason"`
 			} `json:"error"`
 		}
 		_ = json.Unmarshal([]byte(e.ErrorBody), &envelope)
 		reason := safeHTTP2ResetReason(envelope.Error.ResetReason)
-		base.Message = openAIHTTP2PeerResetMessage(reason)
 		failure := &OpsTransportFailure{ResetReason: reason}
+		if envelope.Error.Protocol == "TCP" && envelope.Error.Code == OpenAIUpstreamStreamReadErrorCode {
+			reason = "CONNECTION_RESET"
+			failure = &OpsTransportFailure{Protocol: "TCP", ResetReason: reason}
+		}
+		base.Message = failure.errorMessage()
 		body, _ := json.Marshal(map[string]any{"error": failure.ErrorFields()})
 		return &UserErrorRequestDetail{UserErrorRequest: *base, ErrorBody: string(body), ResetReason: reason}
 	}

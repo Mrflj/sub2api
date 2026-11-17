@@ -83,8 +83,12 @@ func (s *OpenAIGatewayService) handleCCStreamScanError(
 	if openAIStreamClientCanceled(c) || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return fmt.Errorf("stream usage incomplete: %w", cause)
 	}
-	// HTTP/2 reset handling already wrote the precisely classified error. Do
-	// not emit a second event or turn a submitted reset into an account retry.
+	// Preserve the transport boundary verdict: configured pool retries stay
+	// private, while terminal resets already emitted their classified error.
+	var retry *UpstreamFailoverError
+	if errors.As(cause, &retry) && retry.TransportFailure != nil {
+		return cause
+	}
 	if _, _, classified := OpenAIUpstreamStreamReadErrorDetails(cause); classified {
 		return cause
 	}

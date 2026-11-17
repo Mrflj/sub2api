@@ -1315,7 +1315,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.TransportFailure == nil && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1345,7 +1345,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 								return
 							case <-time.After(retryDelay):
 							}
-							if failoverErr.RetryAfterOutput {
+							if failoverErr.RetryAfterOutput || failoverErr.TransportFailure != nil {
 								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue
@@ -1989,7 +1989,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
-					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.TransportFailure == nil && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -2012,7 +2012,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 								return
 							case <-time.After(retryDelay):
 							}
-							if failoverErr.RetryAfterOutput {
+							if failoverErr.RetryAfterOutput || failoverErr.TransportFailure != nil {
 								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue
@@ -2138,6 +2138,9 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 
 // handleAnthropicFailoverExhausted maps upstream failover errors to Anthropic format.
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
+	if service.WriteOpenAIStreamTransportFailure(c, failoverErr) {
+		return
+	}
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	}
@@ -4411,6 +4414,9 @@ func (h *OpenAIGatewayHandler) handleConcurrencyError(c *gin.Context, err error,
 func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr == nil {
 		h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, streamStarted)
+		return
+	}
+	if service.WriteOpenAIStreamTransportFailure(c, failoverErr) {
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)

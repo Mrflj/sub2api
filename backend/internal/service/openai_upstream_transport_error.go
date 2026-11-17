@@ -121,7 +121,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	}
 	// A peer reset can arrive after the POST was consumed but before headers.
 	// Absence of response headers is not evidence that replay is safe.
-	if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, "", err); handled {
+	if resetErr, handled := handleOpenAIStreamTransportReset(c, account, "", err); handled {
 		return resetErr
 	}
 	if routeErr, ok := s.astraRouteFailover(ctx, account, err).(*UpstreamFailoverError); ok {

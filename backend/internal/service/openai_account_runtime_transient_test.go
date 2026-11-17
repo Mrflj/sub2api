@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -9,6 +10,36 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPoolModeSkipsGenericTransientCooldown(t *testing.T) {
+	for _, status := range []int{500, 502, 503, 504, 520, 521, 522, 523, 524} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			svc := &OpenAIGatewayService{}
+			svc.rateLimitService = NewRateLimitService(transientCooldownAccountRepo{}, nil, &config.Config{}, nil, nil)
+			account := &Account{ID: 5108, Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Credentials: map[string]any{"pool_mode": true, "pool_mode_retry_count": 0, "pool_mode_retry_status_codes": []any{502}}}
+			for range 3 {
+				require.False(t, svc.handleOpenAIAccountUpstreamError(context.Background(), account, status, http.Header{}, []byte(`{"error":{"message":"temporary upstream failure"}}`), "gpt-5.5"))
+			}
+			require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-5.5", false))
+			account.Credentials["pool_mode"] = false
+			require.False(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"), "pool failures must not accumulate a hidden cooldown")
+		})
+	}
+}
+
+func TestPoolModeIgnoresExistingGenericTransientCooldown(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	account := &Account{ID: 5109, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{}}
+	for range 2 {
+		svc.recordOpenAIAccountModelTransientFailure(account, "gpt-5.5", time.Now())
+	}
+	require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"))
+	account.Credentials["pool_mode"] = true
+	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-5.5", false))
+	account.Credentials["pool_mode"] = false
+	require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"), "non-pool scheduling must retain its cooldown")
+}
 
 type transientCooldownAccountRepo struct {
 	AccountRepository
