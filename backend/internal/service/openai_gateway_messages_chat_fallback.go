@@ -253,7 +253,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		// Broken upstream read: skip finalization so no synthetic message_stop
 		// masks the truncation, and surface the error to flag usage incomplete
 		// (mirrors forwardResponsesViaRawChatCompletions).
-		streamErr := s.handleCCStreamScanError(c, account, resp, upstreamModel, scan.Err, output.disconnected, writeAnthropicError, func(_ []byte, message string) {
+		streamErr := s.handleCCStreamScanError(c, account, resp, upstreamModel, originalModel, scan.Err, output.disconnected, writeAnthropicError, func(_ []byte, message string) {
 			_, _ = fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("api_error", message))
 			c.Writer.Flush()
 		})

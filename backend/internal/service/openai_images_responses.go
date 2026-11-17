@@ -1822,6 +1822,15 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	defer releaseUpstreamCtx()
 
+	// Image generation already survives client disconnects so completed work
+	// can be accounted for. Its proxy scope follows that upstream lifecycle.
+	proxyCtx, releaseProxy, proxyErr := s.beginOpenAIRequestProxy(upstreamCtx, c, account)
+	if proxyErr != nil {
+		return nil, proxyErr
+	}
+	defer releaseProxy()
+	upstreamCtx = proxyCtx
+
 	if direct && account.IsExcelBPSImagesEnabledForModel(requestModel) && s.excelBPSGloballyEnabled(ctx) {
 		if reason := excelBPSImagesUnsupportedReason(parsed); reason != "" {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Images request stays on Codex: account_id=%d bps_unsupported=%s", account.ID, reason)
@@ -1832,7 +1841,6 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			}
 		}
 	}
-
 	credentialAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 	if err != nil {
 		return nil, err
@@ -1885,7 +1893,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	resp, err := s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
-		if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, "", err); handled {
+		if resetErr, handled := handleOpenAIStreamTransportReset(c, account, "", err); handled {
 			return nil, resetErr
 		}
 		safeErr := sanitizeUpstreamErrorMessage(err.Error())
@@ -1908,7 +1916,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		_ = resp.Body.Close()
 		respBody = s.redactAgentIdentitySensitiveBody(upstreamCtx, account, respBody)
 		if direct && (resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed) {
-			return s.forwardOpenAIImagesOAuth(withOpenAIImagesForceResponses(ctx), c, account, parsed, channelMappedModel)
+			return s.forwardOpenAIImagesOAuth(withOpenAIImagesForceResponses(upstreamCtx), c, account, parsed, channelMappedModel)
 		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 			expectedTaskID := account.GetCredential("task_id")
@@ -1967,7 +1975,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			usage, imageCount, imageOutputSizes, firstTokenMs, err = s.handleOpenAIImagesOAuthStreamingResponse(resp, c, startTime, parsed.ResponseFormat, openAIImagesStreamPrefix(parsed), upstreamModel)
 		}
 		if err != nil {
-			if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resp.Header.Get("x-request-id"), err); handled {
+			if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resp.Header.Get("x-request-id"), err); handled {
 				err = resetErr
 			}
 			if imageCount > 0 {
@@ -2105,7 +2113,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 	if resp != nil {
 		resetRequestID = resp.Header.Get("x-request-id")
 	}
-	if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, resetRequestID, err); handled {
+	if resetErr, handled := handleOpenAIStreamTransportReset(c, account, resetRequestID, err); handled {
 		return resetErr
 	}
 	responseWritten := c != nil && c.Writer != nil && OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c) != writerSizeBeforeResponse

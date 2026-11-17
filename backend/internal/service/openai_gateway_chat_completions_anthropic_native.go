@@ -216,7 +216,7 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -235,7 +235,7 @@ func (s *OpenAIGatewayService) handleCCBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -486,7 +486,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -504,7 +504,7 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 			// EOF / 读错误：事件行后流终止，进入 finalize。
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -558,9 +558,12 @@ func (s *OpenAIGatewayService) handleCCStreamingFromNativeAnthropic(
 	return resultWithUsage(), nil
 }
 
-// Anthropic error events are terminal semantic failures. The conversion state
+// Complete upstream error events are terminal semantic failures. The conversion state
 // machines do not consume them, so stop before their successful finalizers.
 func writeNativeAnthropicSemanticFailure(c *gin.Context, payload []byte, model string) error {
+	if safePayload, changed := sanitizeOpenAIClientReasoningError(payload); changed {
+		payload = safePayload
+	}
 	message := sanitizeUpstreamErrorMessage(extractOpenAISSEErrorMessage(payload))
 	if message == "" {
 		message = "Upstream request failed"
@@ -569,14 +572,37 @@ func writeNativeAnthropicSemanticFailure(c *gin.Context, payload []byte, model s
 	if errType == "" {
 		errType = "upstream_error"
 	}
+	contextRejected := isOpenAIContextWindowError(message, payload)
+	if contextRejected {
+		// Some CC providers supply only the canonical code. Retain request
+		// ownership/SLA exclusion even when error.type is absent or generic.
+		errType = "invalid_request_error"
+	}
 	code := strings.TrimSpace(gjson.GetBytes(payload, "error.code").String())
 	if code == "" {
 		code = errType
 	}
 	status := openAIStreamFailureStatus(payload, message)
-	safeBody, _ := json.Marshal(gin.H{"error": gin.H{"type": errType, "code": code, "message": message}})
+	if contextRejected {
+		status = http.StatusBadRequest
+	}
+	body := gin.H{"error": gin.H{"type": errType, "code": code, "message": message}}
+	if strings.HasSuffix(strings.TrimRight(c.Request.URL.Path, "/"), "/messages") {
+		body["type"] = "error"
+	}
+	safeBody, _ := json.Marshal(body)
 	if c.Writer.Written() {
-		MarkOpsStreamFailure(c, errType, code, message, status)
+		if contextRejected {
+			// The code establishes a request rejection even if the provider's
+			// message is generic. Do not inherit attempt attribution or SLA
+			// ownership from the surrounding HTTP200 stream.
+			MarkOpsStreamErrorValue(c, OpsStreamError{
+				ErrType: errType, Code: code, Message: message, IntendedStatus: status,
+				CountTowardsSLA: true, RequestScoped: true,
+			})
+		} else {
+			MarkOpsStreamFailure(c, errType, code, message, status)
+		}
 		if strings.Contains(c.Request.URL.Path, "/responses") {
 			_, _ = fmt.Fprint(c.Writer, buildOpenAIResponseFailedSSE("", model, time.Now().Unix(), safeBody, message))
 		} else {

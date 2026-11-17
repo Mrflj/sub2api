@@ -55,6 +55,9 @@ func (s *OpenAIGatewayService) forwardAlphaSearch(ctx context.Context, c *gin.Co
 	if s == nil || c == nil || account == nil {
 		return nil, fmt.Errorf("service, context, and account are required")
 	}
+	if err := CheckUpstreamModeration(ctx, c, account); err != nil {
+		return nil, err
+	}
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}

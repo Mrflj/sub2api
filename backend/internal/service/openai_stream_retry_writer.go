@@ -10,14 +10,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// PrepareOpenAIStreamRetry is called only when a partial-output retry was
-// admitted. Later HTTP errors must terminate the existing SSE stream, even if
-// the upstream changes from SSE to a JSON error on the next attempt.
+// PrepareOpenAIStreamRetry pins an admitted retry to its original account.
+// After partial output, later HTTP errors must terminate the existing SSE
+// stream even if the upstream changes from SSE to JSON on the next attempt.
 func PrepareOpenAIStreamRetry(c *gin.Context, accountID int64) {
 	if c == nil || c.Request == nil || c.Writer == nil || accountID <= 0 {
 		return
 	}
 	c.Request = c.Request.WithContext(WithOpenAIStreamRetryAccount(c.Request.Context(), accountID))
+	if !c.Writer.Written() {
+		return
+	}
 	if _, ok := c.Writer.(*openAIOutputRetryWriter); !ok {
 		c.Writer = &openAIOutputRetryWriter{ResponseWriter: c.Writer, c: c}
 	}

@@ -290,6 +290,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}()
 			return h.gatewayService.ForwardAsChatCompletions(rpmAdmission.forwardContext(c.Request.Context(), account), c, account, forwardBody, promptCacheKey, "")
 		}()
+		if service.IsUpstreamModerationDenied(err) {
+			return
+		}
 		if retryOpenAIInitialAdmission(c, err, result, body, account.ID, failedAccountIDs, &switchCount, maxAccountSwitches) {
 			lastAdmissionErr = err
 			reqLog.Info("openai_chat_completions.admission_reselecting", zap.Int64("account_id", account.ID), zap.Int("switch_count", switchCount))
@@ -389,7 +392,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}
-					if !failoverErr.RetryAfterOutput && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
+					if !failoverErr.RetryAfterOutput && failoverErr.TransportFailure == nil && failoverErr.Reason != service.OpenAIEncryptedContentRetryReason && !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -412,7 +415,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 								return
 							case <-time.After(retryDelay):
 							}
-							if failoverErr.RetryAfterOutput {
+							if failoverErr.RetryAfterOutput || failoverErr.TransportFailure != nil {
 								service.PrepareOpenAIStreamRetry(c, account.ID)
 							}
 							continue

@@ -128,7 +128,7 @@ func TestOpenAIAgentDisabledOwnerWithoutEnabledCandidate(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, answer)
 	accounts[0].Schedulable, accounts[1].Schedulable = false, false
 	status, answer = issue715Request(t, h, issue715Body(true, false), 99, "fixture-disabled-empty-pool", false)
-	require.Equal(t, http.StatusBadGateway, status, "preserve the existing empty-pool response: %s", answer)
+	require.Equal(t, http.StatusServiceUnavailable, status, "an empty pool remains a capacity failure: %s", answer)
 	require.NotContains(t, answer, "encrypted_agent_recovery_owner_unavailable")
 	require.Equal(t, []int64{1}, upstream.ids)
 }

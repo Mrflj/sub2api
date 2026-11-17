@@ -218,7 +218,7 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -236,7 +236,7 @@ func (s *OpenAIGatewayService) handleResponsesBufferedFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -489,7 +489,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}
@@ -506,7 +506,7 @@ func (s *OpenAIGatewayService) handleResponsesStreamingFromNativeAnthropic(
 			}
 			logReadErr(rerr)
 			if !terminalSeen && !clientDisconnected {
-				if resetErr, handled := handleOpenAIHTTP2PeerReset(c, account, requestID, rerr); handled {
+				if resetErr, handled := handleOpenAIStreamTransportReset(c, account, requestID, rerr); handled {
 					return resultWithUsage(), resetErr
 				}
 			}

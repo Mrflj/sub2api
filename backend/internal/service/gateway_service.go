@@ -729,6 +729,9 @@ type UpstreamFailoverError struct {
 	SafeToFailoverAfterWrite bool          // 仅写出 SSE 注释等非语义字节时，仍可在同一客户端流中切换账号
 	ConfiguredStreamRetry    bool          // A private pre-output failure uses the account's configured 502 retry policy.
 	RetryAfterOutput         bool          // Configured pool retry after partial output; never rotate accounts.
+	// TransportFailure carries trusted local reset evidence. StatusCode is only
+	// the retry-policy classification, not an upstream HTTP response status.
+	TransportFailure *OpsTransportFailure
 	// HeaderTimeoutSubmitted marks a failover caused by an OpenAI response-header
 	// timeout after the request was written. The upstream may have billed the
 	// attempt; the successful usage record adds one retry surcharge unit.
@@ -763,7 +766,7 @@ func (e *UpstreamFailoverError) IsCredentialFailure() bool {
 // except an Excel BPS 429, which only cools the account's BPS route, and a
 // local BPS image admission rejection, which never reached the upstream.
 func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
-	if e == nil || e.Reason == ExcelBPSRateLimitedReason || e.Reason == GrokUnknownForbiddenReason || e.Reason == OpenAIEncryptedContentRetryReason || e.IsExcelBPSImageAdmissionRejection() {
+	if e == nil || e.TransportFailure != nil || e.Reason == ExcelBPSRateLimitedReason || e.Reason == GrokUnknownForbiddenReason || e.Reason == OpenAIEncryptedContentRetryReason || e.IsExcelBPSImageAdmissionRejection() {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount

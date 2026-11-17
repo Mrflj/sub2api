@@ -84,6 +84,8 @@ func TestGroupPrompt400RecoveryPreservesMappedInstructions(t *testing.T) {
 					if after409 {
 						r := openAIAgentRecoveryFromContext(ctx)
 						r.omittedHistory, r.inputDigest = true, openAIAgentRecoveryInputDigest(body)
+						r.replaySource = append([]byte(nil), body...)
+						r.replayControlsDigest = openAI409ControlsDigest(body)
 					}
 					c.Request = c.Request.WithContext(ctx)
 					_, err = svc.Forward(ctx, c, account, body)
@@ -111,9 +113,9 @@ func TestGroupPrompt400RecoveryPreservesMappedInstructions(t *testing.T) {
 	}
 }
 
-// A peer reset after delivered output must retain that output and the upstream
-// no-replay transport classification at both reader loops.
-func TestOpenAIConfiguredStreamRetryHTTP2ResetDoesNotReplay(t *testing.T) {
+// A configured pool reset retains delivered output while deferring the terminal
+// transport failure until the handler exhausts its same-account retry budget.
+func TestOpenAIConfiguredStreamRetryHTTP2ResetUsesPoolBudget(t *testing.T) {
 	for _, path := range []string{"native", "passthrough", "messages", "chat"} {
 		for _, keepalive := range []int{0, 1} {
 			t.Run(fmt.Sprintf("%s/keepalive=%d", path, keepalive), func(t *testing.T) {
@@ -129,13 +131,20 @@ func TestOpenAIConfiguredStreamRetryHTTP2ResetDoesNotReplay(t *testing.T) {
 				err := runConfiguredRetryStream(svc, c, resp, newConfiguredStreamRetryAccount(), path)
 				require.Error(t, err)
 				var retry *UpstreamFailoverError
-				require.NotErrorAs(t, err, &retry)
-				code, _, ok := OpenAIUpstreamStreamReadErrorDetails(err)
-				require.True(t, ok)
-				require.Equal(t, OpenAIUpstreamHTTP2StreamErrorCode, code)
+				require.ErrorAs(t, err, &retry)
+				require.True(t, retry.RetryableOnSameAccount)
+				require.True(t, retry.RetryAfterOutput)
+				require.False(t, retry.ShouldRetryNextAccount())
+				require.NotNil(t, retry.TransportFailure)
 				require.Contains(t, rec.Body.String(), "private answer")
+				require.NotContains(t, rec.Body.String(), OpenAIUpstreamHTTP2StreamErrorCode)
 				require.NotContains(t, rec.Body.String(), "message_stop")
 				require.NotContains(t, rec.Body.String(), "response.completed")
+				_, marked := GetOpsStreamError(c)
+				require.False(t, marked)
+				require.True(t, WriteOpenAIStreamTransportFailure(c, retry))
+				require.True(t, WriteOpenAIStreamTransportFailure(c, retry), "duplicate exhaustion must not write twice")
+				require.Equal(t, 1, strings.Count(rec.Body.String(), OpenAIUpstreamHTTP2StreamErrorCode))
 				ops, marked := GetOpsStreamError(c)
 				require.True(t, marked)
 				require.NotNil(t, ops.TransportFailure)

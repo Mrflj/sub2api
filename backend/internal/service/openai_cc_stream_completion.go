@@ -73,7 +73,7 @@ func (w *ccStreamWriteState) write(c *gin.Context, headers func(), data string, 
 // Once bytes have reached a client, report an endpoint-native error only: never
 // finalize a tool or return a replayable account-switch error for that attempt.
 func (s *OpenAIGatewayService) handleCCStreamScanError(
-	c *gin.Context, account *Account, resp *http.Response, upstreamModel string,
+	c *gin.Context, account *Account, resp *http.Response, upstreamModel, clientModel string,
 	cause error, disconnected bool, writeHTTP compatErrorWriter,
 	writeSSE func([]byte, string),
 ) error {
@@ -83,8 +83,12 @@ func (s *OpenAIGatewayService) handleCCStreamScanError(
 	if openAIStreamClientCanceled(c) || errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
 		return fmt.Errorf("stream usage incomplete: %w", cause)
 	}
-	// HTTP/2 reset handling already wrote the precisely classified error. Do
-	// not emit a second event or turn a submitted reset into an account retry.
+	// Preserve the transport boundary verdict: configured pool retries stay
+	// private, while terminal resets already emitted their classified error.
+	var retry *UpstreamFailoverError
+	if errors.As(cause, &retry) && retry.TransportFailure != nil {
+		return cause
+	}
 	if _, _, classified := OpenAIUpstreamStreamReadErrorDetails(cause); classified {
 		return cause
 	}
@@ -112,6 +116,9 @@ func (s *OpenAIGatewayService) handleCCStreamScanError(
 	requestID := resp.Header.Get("x-request-id")
 	if retryEligible && !disconnected && !c.Writer.Written() && shouldFailover {
 		return s.newOpenAIStreamFailoverErrorWithModel(c, account, false, requestID, payload, message, upstreamModel, resp.Header)
+	}
+	if semantic != nil && !disconnected && !openAIStreamClientCanceled(c) {
+		return writeNativeAnthropicSemanticFailure(c, payload, openAIClientResponseModel(c, clientModel))
 	}
 	message = s.recordOpenAIStreamUpstreamError(c, account, false, requestID, "http_error", payload, message)
 	if !disconnected && !openAIStreamClientCanceled(c) {
