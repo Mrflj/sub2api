@@ -2881,12 +2881,45 @@ func (s *OpenAIGatewayService) parseSSEUsageFromBody(body string) *OpenAIUsage {
 }
 
 func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel string) string {
-	lines := strings.Split(body, "\n")
-	for i, line := range lines {
-		if _, ok := extractOpenAISSEDataLine(line); !ok {
-			continue
-		}
-		lines[i] = s.replaceModelInSSELine(line, fromModel, toModel)
+	if toModel == "" {
+		return body
 	}
+	lines := strings.Split(body, "\n")
+	var indexes []int
+	var data []string
+	rewriteEvent := func() {
+		if len(indexes) > 1 {
+			// SSE joins data lines before JSON parsing. Preserve their framing,
+			// comments and metadata while rewriting only protocol model fields.
+			payload := strings.Join(data, "\n")
+			if gjson.Valid(payload) {
+				updated := s.replaceModelInSSELine("data: "+payload, fromModel, toModel)
+				parts := strings.Split(strings.TrimPrefix(updated, "data: "), "\n")
+				if len(parts) == len(indexes) {
+					for i, index := range indexes {
+						prefix := lines[index][:len(lines[index])-len(data[i])]
+						lines[index] = prefix + parts[i]
+					}
+					indexes, data = indexes[:0], data[:0]
+					return
+				}
+			}
+		}
+		// Retain compatibility with upstreams emitting independent JSON data
+		// lines without event delimiters, and leave malformed fragments intact.
+		for _, index := range indexes {
+			lines[index] = s.replaceModelInSSELine(lines[index], fromModel, toModel)
+		}
+		indexes, data = indexes[:0], data[:0]
+	}
+	for i, line := range lines {
+		if strings.TrimSuffix(line, "\r") == "" {
+			rewriteEvent()
+		} else if payload, ok := extractOpenAISSEDataLine(line); ok {
+			indexes = append(indexes, i)
+			data = append(data, payload)
+		}
+	}
+	rewriteEvent()
 	return strings.Join(lines, "\n")
 }

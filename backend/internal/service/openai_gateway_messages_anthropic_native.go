@@ -515,6 +515,12 @@ func (s *OpenAIGatewayService) handleNativeAnthropicStreamingResponse(
 				continue
 			}
 			payload := strings.Join(pendingData, "\n")
+			if len(pendingData) > 1 && gjson.Valid(payload) {
+				// Individual fragments cannot reliably expose model or usage.
+				// Observe the complete event before any client-facing rewrite.
+				observer.ObserveAnthropic([]byte(payload))
+				parseSSEUsagePassthrough(payload, usage)
+			}
 			eventType := gjson.Get(payload, "type").String()
 			validTerminal := gjson.Valid(payload) && eventType == "message_stop" && (pendingEventName == "" || pendingEventName == "message_stop")
 			if (pendingEventName == "message_stop" || eventType == "message_stop") && !validTerminal {
