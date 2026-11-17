@@ -1,4 +1,4 @@
-//go:build plaintextowner
+//go:build unit || plaintextowner
 
 package service
 

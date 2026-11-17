@@ -257,7 +257,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		return nil, err
 	}
 	if options != nil && options.useResponsesWebSearch && !hasCompletedMessagesWebSearchCall(respBody) {
-		return nil, fmt.Errorf("messages web search: upstream completed without executing web search")
+		return nil, newMessagesWebSearchNotExecutedError(c, account, resp)
 	}
 	if err := s.writeAlphaSearchResponse(c, options, http.StatusOK, nil, alphaRespBody); err != nil {
 		return nil, err

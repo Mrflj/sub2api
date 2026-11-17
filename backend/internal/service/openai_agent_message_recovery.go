@@ -741,7 +741,7 @@ func (s *OpenAIGatewayService) checkOpenAIAgentRecoveryCompaction(ctx context.Co
 		return err
 	}
 	if !account.IsOpenAI() || account.HasManagedOpenAIConnections() || account.AuthConnectionID != "" ||
-		account.IsOpenAIPassthroughEnabled() || account.IsCopilotSDKEnabled() || account.IsSIWCEnabled() ||
+		(account.IsOpenAIPassthroughEnabled() && !openAI409UsesNativeAPIKey(ctx, account)) || account.IsCopilotSDKEnabled() || account.IsSIWCEnabled() ||
 		req == nil || req.URL == nil || req.GetBody == nil {
 		return request.refusal("wire_changed", "native_compaction", "incompatible_adapter_or_request")
 	}

@@ -402,7 +402,7 @@ func (r *openAIWSAgentRecovery) begin(account *Account, source, payload []byte, 
 		if err != nil {
 			return r.request.refusal("store_unavailable", "ws_continuation", "previous_response_owner_lookup_failed")
 		}
-		if owner != account.ID || gjson.GetBytes(payload, "previous_response_id").String() != previous {
+		if owner != account.ID || (!projected && gjson.GetBytes(payload, "previous_response_id").String() != previous) {
 			return &openAIWSOwnerRouteError{cause: r.request.refusal("owner_unavailable", "ws_continuation", "previous_response_owner_mismatch")}
 		}
 	}

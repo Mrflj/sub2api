@@ -176,17 +176,54 @@ func messagesWebSearchQuery(body []byte) string {
 // return a search success (and bill it) after the hosted tool has completed.
 func hasCompletedMessagesWebSearchCall(body []byte) bool {
 	for _, block := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n\n") {
-		event := gjson.Parse(openAIAlphaSearchSSEData(block))
-		if event.Get("type").String() != "response.completed" {
+		data := openAIAlphaSearchSSEData(block)
+		if !gjson.Valid(data) {
 			continue
 		}
-		for _, output := range event.Get("response.output").Array() {
-			if output.Get("type").String() == "web_search_call" && output.Get("status").String() == "completed" {
+		event := gjson.Parse(data)
+		// Some providers omit completed tool items from the final snapshot.
+		// The caller separately requires a successful response.completed event.
+		switch event.Get("type").String() {
+		case "response.web_search_call.completed":
+			if strings.TrimSpace(event.Get("item_id").String()) != "" {
 				return true
+			}
+		case "response.output_item.done":
+			item := event.Get("item")
+			if item.Get("type").String() == "web_search_call" && item.Get("status").String() == "completed" {
+				return true
+			}
+		case "response.completed":
+			for _, output := range event.Get("response.output").Array() {
+				if output.Get("type").String() == "web_search_call" && output.Get("status").String() == "completed" {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+func newMessagesWebSearchNotExecutedError(c *gin.Context, account *Account, resp *http.Response) *UpstreamFailoverError {
+	const reason = "web_search_not_executed"
+	const message = "Upstream response did not contain a completed web search call"
+	body, _ := json.Marshal(gin.H{"error": gin.H{"code": reason, "type": "upstream_error", "message": message}})
+	setOpsUpstreamError(c, resp.StatusCode, message, string(body))
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		Platform: account.Platform, AccountID: account.ID, AccountName: account.Name,
+		ProxyID: opsUpstreamProxyID(account), ProxyName: opsUpstreamProxyName(account),
+		UpstreamStatusCode: resp.StatusCode, UpstreamRequestID: resp.Header.Get("x-request-id"),
+		Kind: "failover", Stage: "response_validation", Reason: reason,
+		Message: message, Detail: string(body),
+	})
+	// 502 is the retry-policy classification; the actual upstream HTTP status
+	// remains in Ops. Do not send the unverified answer or mutate account state.
+	retryable := account.IsPoolMode() && account.GetPoolModeRetryCount() > 0 && account.IsPoolModeRetryableStatus(http.StatusBadGateway)
+	failover := newOpenAIUpstreamFailoverError(http.StatusBadGateway, resp.Header, body, message, retryable)
+	failover.Stage = GatewayFailureStageInference
+	failover.Scope = GatewayFailureScopeRequest
+	failover.Reason = GatewayFailureReason(reason)
+	return failover
 }
 
 func parseMessagesWebSearchResponse(body []byte, query string) (*websearch.SearchResponse, string, error) {
