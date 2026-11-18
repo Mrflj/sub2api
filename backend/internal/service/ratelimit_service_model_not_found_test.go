@@ -195,7 +195,7 @@ func TestRateLimitService_HandleTempUnschedulable_PoolModeWithoutCustomPolicySki
 	require.Empty(t, repo.modelRateLimitCalls)
 }
 
-func TestRateLimitService_HandleTempUnschedulable_PoolModeCustomPolicyUsesModelScope(t *testing.T) {
+func TestRateLimitService_HandleTempUnschedulable_PoolModeCustomPolicySkipsState(t *testing.T) {
 	repo := &modelNotFoundAccountRepoStub{}
 	svc := &RateLimitService{accountRepo: repo}
 	account := openAIModelNotFoundTempAccount()
@@ -211,10 +211,9 @@ func TestRateLimitService_HandleTempUnschedulable_PoolModeCustomPolicyUsesModelS
 		"gpt-5.4",
 	)
 
-	require.True(t, handled)
+	require.False(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "gpt-5.4", repo.modelRateLimitCalls[0].scope)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 func TestRateLimitService_TempUnschedulableContextPreservesModelForPoolDependency(t *testing.T) {
@@ -224,9 +223,7 @@ func TestRateLimitService_TempUnschedulableContextPreservesModelForPoolDependenc
 	account.Credentials["pool_mode"] = true
 	ctx := withTempUnschedulableModel(context.Background(), []string{"gpt-5.4"})
 
-	// #4496 calls tryTempUnschedulable from the pool-mode branch without an
-	// explicit model argument. The request context must preserve the canonical
-	// model so that combined behavior remains model-scoped after it lands.
+	// Internal callers with a canonical model must not bypass pool protection.
 	handled := svc.tryTempUnschedulable(
 		ctx,
 		account,
@@ -234,10 +231,9 @@ func TestRateLimitService_TempUnschedulableContextPreservesModelForPoolDependenc
 		[]byte(`{"error":{"message":"endpoint not found"}}`),
 	)
 
-	require.True(t, handled)
+	require.False(t, handled)
 	require.Zero(t, repo.tempCalls)
-	require.Len(t, repo.modelRateLimitCalls, 1)
-	require.Equal(t, "gpt-5.4", repo.modelRateLimitCalls[0].scope)
+	require.Empty(t, repo.modelRateLimitCalls)
 }
 
 func TestRateLimitService_HandleUpstreamError_CustomPolicyExclusionSkipsAllState(t *testing.T) {

@@ -24,6 +24,9 @@ func TestMessagesWebSearchSemanticFailureRetriesDedicatedAccount(t *testing.T) {
 		stream, pool, retry502, cancel        bool
 		retries, failedAttempts, wantAttempts int
 		wantSuccess                           bool
+		failureKind                           string
+		wantErrorStatus                       int
+		upstreamStatus                        int
 	}{
 		{name: "recover_sync", pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true},
 		{name: "recover_stream", stream: true, pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true},
@@ -35,6 +38,20 @@ func TestMessagesWebSearchSemanticFailureRetriesDedicatedAccount(t *testing.T) {
 		{name: "pool_disabled", retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 1},
 		{name: "canceled", cancel: true, pool: true, retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 1},
 		{name: "separate_completed_event", stream: true, pool: true, retry502: true, retries: 2, wantAttempts: 1, wantSuccess: true},
+		{name: "failed_502_recovers_sync", pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "failed_502"},
+		{name: "failed_502_ten_retries", pool: true, retry502: true, retries: 10, failedAttempts: 10, wantAttempts: 11, wantSuccess: true, failureKind: "failed_502"},
+		{name: "failed_502_exhausted_stream", stream: true, pool: true, retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 3, failureKind: "failed_502"},
+		{name: "failed_429_recovers_stream", stream: true, pool: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "failed_429"},
+		{name: "failed_429_ten_retries", stream: true, pool: true, retries: 10, failedAttempts: 10, wantAttempts: 11, wantSuccess: true, failureKind: "failed_429"},
+		{name: "failed_429_exhausted_sync", pool: true, retries: 2, failedAttempts: 99, wantAttempts: 3, failureKind: "failed_429", wantErrorStatus: http.StatusTooManyRequests},
+		{name: "failed_429_unconfigured", pool: true, retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 1, failureKind: "failed_429", wantErrorStatus: http.StatusTooManyRequests},
+		{name: "truncated_recovers", stream: true, pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "truncated"},
+		{name: "malformed_completion_recovers", pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "malformed_completion"},
+		{name: "read_error_recovers", stream: true, pool: true, retry502: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "read_error"},
+		{name: "http_429_read_error_recovers", pool: true, retries: 2, failedAttempts: 2, wantAttempts: 3, wantSuccess: true, failureKind: "read_error", upstreamStatus: http.StatusTooManyRequests},
+		{name: "http_429_read_error_unconfigured", pool: true, retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 1, failureKind: "read_error", upstreamStatus: http.StatusTooManyRequests, wantErrorStatus: http.StatusTooManyRequests},
+		{name: "failed_502_zero_budget", pool: true, retry502: true, failedAttempts: 99, wantAttempts: 1, failureKind: "failed_502"},
+		{name: "read_error_canceled", cancel: true, pool: true, retry502: true, retries: 2, failedAttempts: 99, wantAttempts: 1, failureKind: "read_error"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			groupID := int64(42)
@@ -59,11 +76,29 @@ func TestMessagesWebSearchSemanticFailureRetriesDedicatedAccount(t *testing.T) {
 					"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Verified search output\"}]}]}}\n\n"
 				if attempt <= tc.failedAttempts {
 					wire = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"UNVERIFIED-ANSWER\"}]}]}}\n\n"
+					switch tc.failureKind {
+					case "failed_502":
+						wire = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"bps_stream_error\",\"type\":\"bps_stream_error\",\"message\":\"Upstream request failed, please try again later\"}}}\n\n"
+					case "failed_429":
+						wire = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"type\":\"tokens\",\"message\":\"Upstream rate limit exceeded, please retry later\"}}}\n\n"
+					case "truncated", "read_error":
+						wire = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"UNVERIFIED-ANSWER\"}\n\n"
+					case "malformed_completion":
+						wire = "data: {\"type\":\"response.completed\"}\n\n"
+					}
 				}
 				if tc.cancel {
 					cancel()
 				}
-				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{fmt.Sprintf("search-attempt-%d", attempt)}}, Body: io.NopCloser(strings.NewReader(wire))}
+				var responseBody io.ReadCloser = io.NopCloser(strings.NewReader(wire))
+				if attempt <= tc.failedAttempts && tc.failureKind == "read_error" {
+					responseBody = &messagesRetryReadErrorBody{Reader: strings.NewReader(wire), err: io.ErrUnexpectedEOF}
+				}
+				status := http.StatusOK
+				if attempt <= tc.failedAttempts && tc.upstreamStatus != 0 {
+					status = tc.upstreamStatus
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Request-Id": []string{fmt.Sprintf("search-attempt-%d", attempt)}}, Body: responseBody}
 			}}
 			billingCache := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 			t.Cleanup(billingCache.Stop)
@@ -85,6 +120,18 @@ func TestMessagesWebSearchSemanticFailureRetriesDedicatedAccount(t *testing.T) {
 				require.Equal(t, string(upstream.requestBodies[0]), string(upstream.requestBodies[i]), "retries must preserve the request and cache identity")
 			}
 			require.NotContains(t, rec.Body.String(), "UNVERIFIED-ANSWER")
+			if tc.failureKind == "failed_502" || tc.failureKind == "failed_429" {
+				events, ok := c.Get(service.OpsUpstreamErrorsKey)
+				require.True(t, ok, "failed attempts must remain observable")
+				upstreamErrors, ok := events.([]*service.OpsUpstreamErrorEvent)
+				require.True(t, ok)
+				require.NotEmpty(t, upstreamErrors)
+				message := "Upstream request failed, please try again later"
+				if tc.failureKind == "failed_429" {
+					message = "Upstream rate limit exceeded, please retry later"
+				}
+				require.Equal(t, message, upstreamErrors[0].Message)
+			}
 			if tc.wantSuccess {
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Contains(t, rec.Body.String(), "Verified search output")
@@ -94,7 +141,11 @@ func TestMessagesWebSearchSemanticFailureRetriesDedicatedAccount(t *testing.T) {
 			} else {
 				require.Empty(t, usage.rows)
 				if !tc.cancel {
-					require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+					wantStatus := tc.wantErrorStatus
+					if wantStatus == 0 {
+						wantStatus = http.StatusBadGateway
+					}
+					require.Equal(t, wantStatus, rec.Code, rec.Body.String())
 				}
 			}
 		})

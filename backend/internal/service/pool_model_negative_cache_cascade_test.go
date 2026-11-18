@@ -15,7 +15,7 @@ import (
 
 // The fastpath calls this writer before the generic pool guard. Exercise all
 // three entry points so moving the guard at just one caller cannot hide a leak.
-func TestPoolModelNegativeCacheWriterRespectsPoolDefaultAndOverrides(t *testing.T) {
+func TestPoolModelNegativeCacheWriterNeverOverridesPoolProtection(t *testing.T) {
 	for _, status := range []int{404, 401} {
 		for _, policy := range []string{"pool-default", "custom-include", "custom-exclude", "temp-rule", "nonpool"} {
 			for _, entry := range []string{"writer", "shared-policy", "http-fastpath"} {
@@ -49,7 +49,7 @@ func TestPoolModelNegativeCacheWriterRespectsPoolDefaultAndOverrides(t *testing.
 					case "http-fastpath":
 						gateway.handleOpenAIAccountUpstreamError(context.Background(), account, status, http.Header{}, body, "provider-sol")
 					}
-					wantWrite := policy == "custom-include" || policy == "nonpool" || (policy == "temp-rule" && entry != "writer")
+					wantWrite := policy == "nonpool"
 					if !wantWrite {
 						require.Empty(t, repo.modelRateLimitCalls, "default pool must not cache a relay member's observation")
 					} else {
@@ -58,10 +58,7 @@ func TestPoolModelNegativeCacheWriterRespectsPoolDefaultAndOverrides(t *testing.
 						require.Equal(t, account.ID, call.accountID)
 						require.Equal(t, "provider-sol", call.scope)
 						cooldown := 30 * time.Minute
-						if policy == "temp-rule" {
-							cooldown = 7 * time.Minute
-							require.Contains(t, call.reason, `"scope":"model"`)
-						} else if status == 401 {
+						if status == 401 {
 							require.Equal(t, upstreamModelNotFound401Reason, call.reason)
 						} else {
 							require.Equal(t, upstreamModelNotFoundReason, call.reason)

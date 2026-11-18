@@ -211,7 +211,7 @@ func TestOpenAIFailoverSideEffects_401FollowsTempUnschedScope(t *testing.T) {
 		wantBlocked  bool
 	}{
 		{name: "显式模型级 只冷却模型", scopes: []string{TempUnschedScopeModel}, wantModel: true},
-		{name: "显式模型级 池模式 只冷却模型", scopes: []string{TempUnschedScopeModel}, poolMode: true, wantModel: true},
+		{name: "显式模型级 池模式 不冷却模型", scopes: []string{TempUnschedScopeModel}, poolMode: true},
 		{name: "缺省 走认证错误处理", scopes: []string{""}, wantSetError: true, wantBlocked: true},
 		{name: "显式账号级 走认证错误处理", scopes: []string{TempUnschedScopeAccount}, wantSetError: true, wantBlocked: true},
 		{name: "首条命中为账号级 走认证错误处理", scopes: []string{TempUnschedScopeAccount, TempUnschedScopeModel}, wantSetError: true, wantBlocked: true},

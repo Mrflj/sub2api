@@ -1317,13 +1317,13 @@ export default {
       modelMappingConflict: '该模型已配置映射 {from} → {to}，请在模型映射中修改或删除后再添加白名单模型',
       modelCount: '{count} 个模型',
       poolMode: '池模式',
-      poolModeHint: '上游为账号池时启用，错误不标记本地账号状态',
+      poolModeHint: '上游为账号池时启用，上游错误不自动停用账号或冷却账号、模型',
       poolModeInfo:
-        '启用后，上游 429/403/401 错误将自动重试而不标记账号限流或错误，适用于上游指向另一个 sub2api 实例的场景。',
+        '启用后，按配置的状态码和次数重试；上游错误、网络故障和失败探测不会自动停用或冷却本地账号、模型，自定义错误停用和冷却规则也不生效。手动关闭调度仍然有效。',
       poolModeRetryCount: '同账号重试次数',
       poolModeRetryCountHint: '仅在池模式下生效。0 表示不原地重试；默认 {default}，最大 {max}。',
       poolModeRetryStatusCodes: '同账号重试状态码',
-      poolModeRetryStatusCodesHint: '仅在池模式下生效。以英文逗号分隔的 HTTP 状态码（100-599），命中时触发同账号重试。列入 503 且账号未配置代理时，连不上上游（拒绝连接、网络不可达等）也按 503 原地重试，不再临时停调度 10 分钟。留空使用默认值（{default}）。',
+      poolModeRetryStatusCodesHint: '仅在池模式下生效。以英文逗号分隔的 HTTP 状态码（100-599），命中时触发同账号重试。连接失败在列入 503 时按 503 重试，否则按 502 判断是否重试；无论是否重试，都不会自动冷却账号。留空使用默认值（{default}）。',
       explicitCacheUpstream: '上游支持显式缓存',
       explicitCacheUpstreamHint: '仅当上游是已支持显式缓存的本系统时开启',
       explicitCacheUpstreamInfo:

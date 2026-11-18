@@ -235,7 +235,7 @@ func TestCheckErrorPolicy(t *testing.T) {
 			expected:   ErrorPolicyMatched, // custom codes take precedence
 		},
 		{
-			name: "pool_mode_custom_error_codes_hit_returns_matched",
+			name: "pool_mode_custom_error_codes_hit_returns_skipped",
 			account: &Account{
 				ID:       7,
 				Type:     AccountTypeAPIKey,
@@ -248,7 +248,7 @@ func TestCheckErrorPolicy(t *testing.T) {
 			},
 			statusCode: 401,
 			body:       []byte(`unauthorized`),
-			expected:   ErrorPolicyMatched,
+			expected:   ErrorPolicySkipped,
 		},
 		{
 			name: "pool_mode_without_custom_error_codes_returns_skipped",
@@ -265,7 +265,7 @@ func TestCheckErrorPolicy(t *testing.T) {
 			expected:   ErrorPolicySkipped,
 		},
 		{
-			name: "pool_mode_temp_unschedulable_hit_returns_temp_unscheduled",
+			name: "pool_mode_temp_unschedulable_hit_returns_skipped",
 			account: &Account{
 				ID:       9,
 				Type:     AccountTypeAPIKey,
@@ -284,7 +284,7 @@ func TestCheckErrorPolicy(t *testing.T) {
 			},
 			statusCode: http.StatusServiceUnavailable,
 			body:       []byte(`Service temporarily unavailable`),
-			expected:   ErrorPolicyTempUnscheduled,
+			expected:   ErrorPolicySkipped,
 		},
 		{
 			name: "pool_mode_temp_unschedulable_miss_returns_skipped",
@@ -341,7 +341,7 @@ func TestHandleUpstreamError_PoolModePolicies(t *testing.T) {
 		require.Equal(t, 0, repo.tempCalls)
 	})
 
-	t.Run("pool_mode_with_custom_error_codes_uses_local_error_policy", func(t *testing.T) {
+	t.Run("pool_mode_with_custom_error_codes_still_skips_state", func(t *testing.T) {
 		repo := &errorPolicyRepoStub{}
 		svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 		account := &Account{
@@ -357,12 +357,12 @@ func TestHandleUpstreamError_PoolModePolicies(t *testing.T) {
 
 		shouldDisable := svc.HandleUpstreamError(context.Background(), account, 401, http.Header{}, []byte("unauthorized"))
 
-		require.True(t, shouldDisable)
-		require.Equal(t, 1, repo.setErrCalls)
+		require.False(t, shouldDisable)
+		require.Equal(t, 0, repo.setErrCalls)
 		require.Equal(t, 0, repo.tempCalls)
 	})
 
-	t.Run("pool_mode_explicit_temp_rule_stops_scheduling", func(t *testing.T) {
+	t.Run("pool_mode_explicit_temp_rule_does_not_stop_scheduling", func(t *testing.T) {
 		repo := &errorPolicyRepoStub{}
 		svc := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 		account := &Account{
@@ -390,9 +390,9 @@ func TestHandleUpstreamError_PoolModePolicies(t *testing.T) {
 			[]byte("Service temporarily unavailable"),
 		)
 
-		require.True(t, shouldDisable)
+		require.False(t, shouldDisable)
 		require.Equal(t, 0, repo.setErrCalls)
-		require.Equal(t, 1, repo.tempCalls)
+		require.Equal(t, 0, repo.tempCalls)
 	})
 
 	t.Run("pool_mode_temp_rule_miss_still_skips", func(t *testing.T) {

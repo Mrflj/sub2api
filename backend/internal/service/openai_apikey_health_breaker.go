@@ -52,6 +52,10 @@ func classifyOpenAIAPIKeyHealthFailure(err error) (int, []byte, bool) {
 }
 
 func (s *RateLimitService) ObserveOpenAIAPIKeyHealthFailure(ctx context.Context, account *Account, upstreamErr error) bool {
+	// Pool retries/failover must not accumulate into a persistent local outage.
+	if account != nil && account.IsPoolMode() {
+		return false
+	}
 	if s == nil || s.openAIAPIKeyHealth == nil || s.settingService == nil || s.accountRepo == nil || !isOpenAIAPIKeyHealthBreakerAccount(account) {
 		return false
 	}

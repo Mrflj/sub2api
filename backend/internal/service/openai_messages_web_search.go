@@ -205,8 +205,10 @@ func hasCompletedMessagesWebSearchCall(body []byte) bool {
 }
 
 func newMessagesWebSearchNotExecutedError(c *gin.Context, account *Account, resp *http.Response) *UpstreamFailoverError {
-	const reason = "web_search_not_executed"
-	const message = "Upstream response did not contain a completed web search call"
+	return newMessagesWebSearchResponseError(c, account, resp, "web_search_not_executed", "Upstream response did not contain a completed web search call")
+}
+
+func newMessagesWebSearchResponseError(c *gin.Context, account *Account, resp *http.Response, reason, message string) *UpstreamFailoverError {
 	body, _ := json.Marshal(gin.H{"error": gin.H{"code": reason, "type": "upstream_error", "message": message}})
 	setOpsUpstreamError(c, resp.StatusCode, message, string(body))
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -216,10 +218,14 @@ func newMessagesWebSearchNotExecutedError(c *gin.Context, account *Account, resp
 		Kind: "failover", Stage: "response_validation", Reason: reason,
 		Message: message, Detail: string(body),
 	})
-	// 502 is the retry-policy classification; the actual upstream HTTP status
-	// remains in Ops. Do not send the unverified answer or mutate account state.
-	retryable := account.IsPoolMode() && account.GetPoolModeRetryCount() > 0 && account.IsPoolModeRetryableStatus(http.StatusBadGateway)
-	failover := newOpenAIUpstreamFailoverError(http.StatusBadGateway, resp.Header, body, message, retryable)
+	// Invalid 2xx responses use 502 for retry policy. If reading an HTTP error
+	// failed, retain its known status instead of converting a 429 into a 502.
+	status := http.StatusBadGateway
+	if resp.StatusCode >= http.StatusBadRequest {
+		status = resp.StatusCode
+	}
+	retryable := account.IsPoolMode() && account.GetPoolModeRetryCount() > 0 && account.IsPoolModeRetryableStatus(status)
+	failover := newOpenAIUpstreamFailoverError(status, resp.Header, body, message, retryable)
 	failover.Stage = GatewayFailureStageInference
 	failover.Scope = GatewayFailureScopeRequest
 	failover.Reason = GatewayFailureReason(reason)

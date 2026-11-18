@@ -93,6 +93,16 @@ func isOpenAIAccount(account *Account) bool {
 // handleOpenAIAccountUpstreamError expects canonicalModel to be the model used
 // for scheduling after applying account mapping exactly once.
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, canonicalModel ...string) (shouldDisable bool) {
+	// Keep fastpaths consistent with the shared policy: retry/failover for this
+	// request is allowed, but an upstream pool failure cannot suspend its route.
+	if account != nil && account.IsPoolMode() {
+		if s != nil {
+			s.rateLimitService.observeAccountOps(ctx, account, statusCode, headers, responseBody)
+			scheduleOllamaCloudUsageActivity(s.deferredService, account)
+			scheduleOpenCodeGoUsageActivity(s.deferredService, account)
+		}
+		return false
+	}
 	if s != nil {
 		var disabledOn429 bool
 		ctx, disabledOn429 = s.rateLimitService.maybeDisableOpenAISchedulingOn429(ctx, account, statusCode, headers)

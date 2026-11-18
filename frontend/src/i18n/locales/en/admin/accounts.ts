@@ -1213,15 +1213,15 @@ export default {
       modelMappingConflict: 'A mapping already exists for {from} → {to}. Modify or remove it under Model Mapping before adding this whitelist model',
       modelCount: '{count} models',
       poolMode: 'Pool Mode',
-      poolModeHint: 'Enable when upstream is an account pool; errors won\'t mark local account status',
+      poolModeHint: 'Enable for an upstream account pool; upstream errors do not disable accounts or cool down accounts and models',
       poolModeInfo:
-        'When enabled, upstream 429/403/401 errors will auto-retry without marking the account as rate-limited or errored. Suitable for upstream pointing to another sub2api instance.',
+        'Retry using the configured statuses and count. Upstream errors, network failures and failed probes do not automatically disable or cool down local accounts or models, even with custom error or cooldown rules. Manual scheduling switches still apply.',
       poolModeRetryCount: 'Same-Account Retries',
       poolModeRetryCountHint:
         'Only applies in pool mode. Use 0 to disable in-place retry. Default {default}, maximum {max}.',
       poolModeRetryStatusCodes: 'Retry Status Codes',
       poolModeRetryStatusCodesHint:
-        'Comma-separated HTTP status codes (100-599) that trigger same-account retry in pool mode. With 503 listed and no proxy on the account, connection failures (refused, unreachable, etc.) are also retried in place as 503 instead of temporarily unscheduling the account for 10 minutes. Leave blank to use defaults ({default}).',
+        'Comma-separated HTTP status codes (100-599) that trigger same-account retry in pool mode. Connection failures use the 503 retry policy when listed, otherwise the 502 policy. Accounts are never automatically cooled down, regardless of retry eligibility. Leave blank to use defaults ({default}).',
       explicitCacheUpstream: 'Upstream Supports Explicit Caching',
       explicitCacheUpstreamHint: 'Enable only when the upstream is this system with explicit caching support',
       explicitCacheUpstreamInfo:
