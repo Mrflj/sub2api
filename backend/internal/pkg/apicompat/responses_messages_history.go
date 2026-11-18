@@ -306,26 +306,40 @@ func attachResponsesHistoryOutputWithSignatures(response *AnthropicResponse, out
 	return true
 }
 
-func restoreResponsesHistory(blocks []AnthropicContentBlock, scope string) ([]ResponsesInputItem, bool, error) {
+func parseResponsesHistory(blocks []AnthropicContentBlock) (*responsesHistoryEnvelope, error) {
 	var raw json.RawMessage
+	found := false
 	for _, block := range blocks {
 		if block.Type != ResponsesHistoryBlockType {
 			continue
 		}
-		if raw != nil {
-			return nil, false, unsupportedRequestConversion("duplicate Responses history state")
+		if found {
+			return nil, unsupportedRequestConversion("duplicate Responses history state")
 		}
+		found = true
 		raw = block.Content
 	}
-	if raw == nil {
-		return nil, false, nil
+	if !found {
+		return nil, nil
 	}
 	if len(raw) > maxResponsesHistoryBytes {
-		return nil, false, unsupportedRequestConversion("Responses history state exceeds the supported limit")
+		return nil, unsupportedRequestConversion("Responses history state exceeds the supported limit")
 	}
 	var state responsesHistoryEnvelope
 	if json.Unmarshal(raw, &state) != nil || state.Version != 1 || !validResponsesHistoryScope(state.Scope) || !validResponsesHistoryOutput(state.Output) || !validResponsesHistorySignatures(state.Output, state.Signatures) {
-		return nil, false, unsupportedRequestConversion("invalid Responses history state")
+		return nil, unsupportedRequestConversion("invalid Responses history state")
+	}
+	return &state, nil
+}
+
+func restoreResponsesHistory(blocks []AnthropicContentBlock, scope string) ([]ResponsesInputItem, bool, error) {
+	return restoreResponsesHistoryWithFallback(blocks, scope, nil)
+}
+
+func restoreResponsesHistoryWithFallback(blocks []AnthropicContentBlock, scope string, onFallback func()) ([]ResponsesInputItem, bool, error) {
+	state, err := parseResponsesHistory(blocks)
+	if err != nil || state == nil {
+		return nil, false, err
 	}
 	// State from another upstream account/model is opaque foreign state. Keep
 	// the visible conversation but never send its ciphertext to that account.
@@ -356,10 +370,41 @@ func restoreResponsesHistory(blocks []AnthropicContentBlock, scope string) ([]Re
 			return nil, false, err
 		}
 		items, err := anthropicAssistantToResponses(content)
+		if err == nil && onFallback != nil {
+			onFallback()
+		}
 		return items, true, err
 	}
 	if !historyMatchesBlocksWithSignatures(state.Output, blocks, state.Signatures) {
-		return nil, false, unsupportedRequestConversion("Responses history does not match the assistant message")
+		// Clients may edit, compact or merge visible assistant turns. Treat
+		// their current history as authoritative instead of replaying a stale
+		// capsule or rejecting the conversation. Opaque reasoning cannot be
+		// associated safely with that changed turn and is not replayed.
+		visible := make([]AnthropicContentBlock, 0, len(blocks))
+		for _, block := range blocks {
+			switch block.Type {
+			case ResponsesHistoryBlockType, "thinking":
+				continue
+			case "server_tool_use", "web_search_tool_result":
+				// Keep visible search queries/results as historical text, not
+				// fabricated native hosted calls with unverified provider state.
+				data, err := json.Marshal(block)
+				if err != nil {
+					return nil, false, err
+				}
+				block = AnthropicContentBlock{Type: "text", Text: string(data)}
+			}
+			visible = append(visible, block)
+		}
+		content, err := json.Marshal(visible)
+		if err != nil {
+			return nil, false, err
+		}
+		items, err := anthropicAssistantToResponses(content)
+		if err == nil && onFallback != nil {
+			onFallback()
+		}
+		return items, true, err
 	}
 	items := make([]ResponsesInputItem, len(state.Output))
 	for index, item := range state.Output {
@@ -384,21 +429,8 @@ func ResponsesHistoryMatchesAssistantContent(content json.RawMessage) bool {
 	if json.Unmarshal(content, &blocks) != nil {
 		return false
 	}
-	var scope string
-	for _, block := range blocks {
-		if block.Type == ResponsesHistoryBlockType {
-			var envelope responsesHistoryEnvelope
-			if json.Unmarshal(block.Content, &envelope) != nil {
-				return false
-			}
-			scope = envelope.Scope
-		}
-	}
-	if !validResponsesHistoryScope(scope) {
-		return false
-	}
-	_, restored, err := restoreResponsesHistory(blocks, scope)
-	return restored && err == nil
+	state, err := parseResponsesHistory(blocks)
+	return err == nil && state != nil && historyMatchesBlocksWithSignatures(state.Output, blocks, state.Signatures)
 }
 
 // Capture only original provider items. No model invocation, invented search

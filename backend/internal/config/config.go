@@ -957,12 +957,20 @@ type BillingConfig struct {
 	InflightReservation InflightReservationConfig `mapstructure:"inflight_reservation"`
 }
 
-// InflightReservationConfig 余额模式在途预留配置。
-// 准入时按 输入估算 + 输出单价 × max_tokens 估算单请求费用，在 Redis 中原子地
+// InflightReservationConfig 在途费用预留配置，已知金额费用默认保留预留保护。
+// 普通推理的估算费用预留默认关闭；显式启用 ReserveEstimates 后，按
+// 输入估算 + 输出单价 × max_tokens 估算单请求费用，在 Redis 中原子地
 // 校验 缓存余额 - 在途预留合计 >= 估算 后登记预留，请求结束（任意路径）释放。
 // 估算失败或 Redis 不可用时 fail-open，退回旧的仅余额 > 阈值检查。
 type InflightReservationConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+	// ReserveEstimates opts ordinary inference into estimated-cost reservations.
+	// Fixed, known-price charges keep their reservation guard independently.
+	ReserveEstimates bool `mapstructure:"reserve_estimates"`
+	// WaitTimeoutSeconds bounds gateway admission waits for temporary reservation contention; 0 disables waiting.
+	WaitTimeoutSeconds int `mapstructure:"wait_timeout_seconds"`
+	// WaitMaxWaiting limits reservation waiters per user in each process; 0 disables waiting.
+	WaitMaxWaiting int `mapstructure:"wait_max_waiting"`
 	// TTLSeconds 单条预留的最长存活时间；进程崩溃等泄漏的预留到期自动失效。
 	TTLSeconds int `mapstructure:"ttl_seconds"`
 	// DefaultMaxTokens 请求未携带 max_tokens 时用于估算的输出 token 数。
@@ -986,7 +994,7 @@ type CircuitBreakerConfig struct {
 }
 
 type ConcurrencyConfig struct {
-	// PingInterval: 并发等待期间的 SSE ping 间隔（秒）
+	// PingInterval: 并发等待期间的 SSE ping 间隔（秒），0 禁用 ping
 	PingInterval int `mapstructure:"ping_interval"`
 }
 
@@ -2461,6 +2469,9 @@ func setDefaults() {
 	viper.SetDefault("billing.user_platform_quota_cache_ttl_seconds", 86400)
 	viper.SetDefault("billing.user_platform_quota_sentinel_ttl_seconds", 3600)
 	viper.SetDefault("billing.inflight_reservation.enabled", true)
+	viper.SetDefault("billing.inflight_reservation.reserve_estimates", false)
+	viper.SetDefault("billing.inflight_reservation.wait_timeout_seconds", 30)
+	viper.SetDefault("billing.inflight_reservation.wait_max_waiting", 8)
 	viper.SetDefault("billing.inflight_reservation.ttl_seconds", 900)
 	viper.SetDefault("billing.inflight_reservation.default_max_tokens", 8192)
 	viper.SetDefault("billing.inflight_reservation.max_output_tokens", 128000)
@@ -3513,8 +3524,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Billing.InflightReservation.TTLSeconds < 0 || c.Billing.InflightReservation.DefaultMaxTokens < 0 ||
 		c.Billing.InflightReservation.MaxOutputTokens < 0 || c.Billing.InflightReservation.MaxInputTokens < 0 ||
-		c.Billing.InflightReservation.MaxReservationUSD < 0 {
+		c.Billing.InflightReservation.MaxReservationUSD < 0 || c.Billing.InflightReservation.WaitTimeoutSeconds < 0 ||
+		c.Billing.InflightReservation.WaitMaxWaiting < 0 {
 		return fmt.Errorf("billing.inflight_reservation values must be non-negative")
+	}
+	if c.Billing.InflightReservation.WaitTimeoutSeconds > 300 {
+		return fmt.Errorf("billing.inflight_reservation.wait_timeout_seconds must not exceed 300")
 	}
 	if c.Database.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be positive")
@@ -4209,8 +4224,8 @@ func (c *Config) Validate() error {
 	if c.Ops.Cleanup.Enabled && strings.TrimSpace(c.Ops.Cleanup.Schedule) == "" {
 		return fmt.Errorf("ops.cleanup.schedule is required when ops.cleanup.enabled=true")
 	}
-	if c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30 {
-		return fmt.Errorf("concurrency.ping_interval must be between 5-30 seconds")
+	if c.Concurrency.PingInterval != 0 && (c.Concurrency.PingInterval < 5 || c.Concurrency.PingInterval > 30) {
+		return fmt.Errorf("concurrency.ping_interval must be 0 (disabled) or between 5-30 seconds")
 	}
 	if c.Gateway.Grok.FreeQuotaSoftGateEnabled {
 		if c.Gateway.Grok.FreeQuotaTokenLimit <= 0 {

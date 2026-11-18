@@ -27,7 +27,6 @@ func TestRequestMediaConversionUnsupportedReturns400BeforeUpstream(t *testing.T)
 		{"messages_document_file_id_responses", "messages", APIProtocolResponses, `{"model":"gpt-4.1","max_tokens":128,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"anthropic_fixture"}}]}]}`, "document source"},
 		{"responses_file_url_chat", "responses", APIProtocolChatCompletions, `{"model":"gpt-4.1","input":[{"role":"user","content":[{"type":"input_file","file_url":"https://example.invalid/report.pdf"}]}]}`, "file_url"},
 		{"responses_file_id_messages", "responses", APIProtocolAnthropic, `{"model":"gpt-4.1","input":[{"role":"user","content":[{"type":"input_file","file_id":"openai_fixture"}]}]}`, "file_id"},
-		{"chat_seed_responses", "chat/completions", APIProtocolResponses, `{"model":"gpt-4.1","messages":[{"role":"user","content":"fixture"}],"seed":0}`, "seed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
@@ -70,7 +69,7 @@ func TestRequestMediaConversionUnsupportedReturns400BeforeUpstream(t *testing.T)
 
 func TestRequestMediaNativeChatPassthroughPreservesVideoAndControls(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	body := []byte(`{"model":"fixture-video","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"https://example.invalid/clip.mp4","fps":2}}]}],"seed":0,"frequency_penalty":0,"presence_penalty":0.25,"provider_fixture_control":{"preserve":true}}`)
+	body := []byte(`{"model":"fixture-video","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"https://example.invalid/clip.mp4","fps":2}}]}],"seed":0,"frequency_penalty":0,"presence_penalty":0.25,"logit_bias":{"1":-100},"n":2,"stop":["END"],"provider_fixture_control":{"preserve":true}}`)
 	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusOK,
 		Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"id":"fixture","model":"fixture-video","choices":[{"index":0,"message":{"role":"assistant","content":"fixture accepted"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))}}
 	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
@@ -88,7 +87,12 @@ func TestRequestMediaNativeChatPassthroughPreservesVideoAndControls(t *testing.T
 	require.Equal(t, "https://example.invalid/clip.mp4", gjson.GetBytes(upstream.lastBody, "messages.0.content.0.video_url.url").String())
 	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "messages.0.content.0.video_url.fps").Int())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "seed").Exists())
+	require.True(t, gjson.GetBytes(upstream.lastBody, "frequency_penalty").Exists())
+	require.Equal(t, 0.0, gjson.GetBytes(upstream.lastBody, "frequency_penalty").Float())
 	require.Equal(t, 0.25, gjson.GetBytes(upstream.lastBody, "presence_penalty").Float())
+	require.JSONEq(t, `{"1":-100}`, gjson.GetBytes(upstream.lastBody, "logit_bias").Raw)
+	require.Equal(t, int64(2), gjson.GetBytes(upstream.lastBody, "n").Int())
+	require.Equal(t, "END", gjson.GetBytes(upstream.lastBody, "stop.0").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "provider_fixture_control.preserve").Bool())
 }
 

@@ -165,14 +165,7 @@ func TestRequestGenerationControlsMapWithoutLosingZeroValues(t *testing.T) {
 	require.ErrorContains(t, err, "logprobs")
 }
 
-func TestRequestGenerationUnsupportedControlsAreExplicit(t *testing.T) {
-	for _, field := range []string{`"frequency_penalty":0`, `"presence_penalty":0`, `"seed":0`, `"logit_bias":{"1":0}`, `"n":2`, `"stop":["END"]`} {
-		var req ChatCompletionsRequest
-		require.NoError(t, json.Unmarshal([]byte(`{"model":"fixture","messages":[],`+field+`}`), &req))
-		_, err := ChatCompletionsToResponses(&req)
-		require.Error(t, err)
-		require.True(t, IsUnsupportedRequestConversion(err))
-	}
+func TestRequestGenerationStopSequencesRequireNativeOrLocalHandling(t *testing.T) {
 	var req AnthropicRequest
 	require.NoError(t, json.Unmarshal([]byte(`{"model":"gpt-4.1","max_tokens":256,"messages":[{"role":"user","content":"fixture"}],"stop_sequences":["END"]}`), &req))
 	chat, err := AnthropicToChatCompletionsRequest(&req)

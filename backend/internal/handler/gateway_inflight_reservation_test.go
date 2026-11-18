@@ -56,6 +56,7 @@ func TestReserveInflightBalance_SkipsWhenDisabledOrSubscription(t *testing.T) {
 	require.Equal(t, 0, est.calls, "disabled switch must not even estimate")
 
 	cfg.Billing.InflightReservation.Enabled = true
+	cfg.Billing.InflightReservation.ReserveEstimates = true
 	apiKey.Group = &service.Group{SubscriptionType: service.SubscriptionTypeSubscription}
 	done, err = reserveInflightBalance(newInflightTestGinContext(), billing, est, apiKey, &service.UserSubscription{}, tokenInflightEstimate("m", []byte(`{}`)))
 	require.NoError(t, err)
@@ -66,7 +67,7 @@ func TestReserveInflightBalance_SkipsWhenDisabledOrSubscription(t *testing.T) {
 func TestReserveInflightBalance_UnpricedFailOpenByDefaultFailClosedOptIn(t *testing.T) {
 	cache := newHandlerInflightCache(10)
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	billing := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billing.Stop)
 	apiKey := &service.APIKey{User: &service.User{ID: 1}}
@@ -80,6 +81,36 @@ func TestReserveInflightBalance_UnpricedFailOpenByDefaultFailClosedOptIn(t *test
 	_, err = reserveInflightBalance(newInflightTestGinContext(), billing, est, apiKey, nil, tokenInflightEstimate("unknown", nil))
 	require.ErrorIs(t, err, service.ErrBillingServiceUnavailable)
 	require.NotErrorIs(t, err, service.ErrInsufficientBalance)
+}
+
+func TestReserveInflightBalance_DefaultSkipsEstimatesAndExistingHolds(t *testing.T) {
+	cache := newHandlerInflightCache(10)
+	allowed, _, err := cache.ReserveInflightBalance(context.Background(), 1, "old-request", 100, 10, time.Minute)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	cfg := &config.Config{}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{
+		Enabled: true, TTLSeconds: 60, FailClosedOnUnpriced: true,
+		WaitTimeoutSeconds: 30, WaitMaxWaiting: 8,
+	}
+	billing := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billing.Stop)
+	est := &countingEstimator{priced: false}
+	key := &service.APIKey{User: &service.User{ID: 1, Balance: 10}}
+	for _, kind := range []service.InflightEstimateKind{
+		service.InflightEstimateToken, service.InflightEstimateImage,
+		service.InflightEstimatePerRequest, service.InflightEstimateVideo, service.InflightEstimateAudio,
+	} {
+		c := newInflightTestGinContext()
+		done, err := reserveInflightBalance(c, billing, est, key, nil, service.InflightEstimateRequest{Model: "unknown", Kind: kind})
+		require.NoError(t, err)
+		done()
+		require.False(t, c.Writer.Written())
+		require.Nil(t, service.InflightReservationFromContext(c.Request.Context()))
+	}
+	require.Zero(t, est.calls, "disabled estimates must skip pricing, including fail-closed unpriced models")
+	require.Equal(t, 1, cache.count(), "ordinary admission must not clear another request's hold")
+	require.True(t, billing.InflightReservationEnabled(), "fixed known-price reservations remain enabled")
 }
 
 // handlerInflightCache 内存版余额缓存 + 在途预留（语义同 Redis Lua）。
@@ -134,7 +165,7 @@ func (m *handlerInflightCache) count() int {
 func TestWrapUsageRecordTaskContext_HandsReservationToBillingTask(t *testing.T) {
 	cache := newHandlerInflightCache(1)
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	billing := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billing.Stop)
 	apiKey := &service.APIKey{User: &service.User{ID: 5}}
@@ -164,11 +195,38 @@ func TestWrapUsageRecordTaskContext_HandsReservationToBillingTask(t *testing.T) 
 	require.Equal(t, 0, cache.count())
 }
 
+func TestReserveInflightBalance_WaitsForReleaseWithoutWritingResponse(t *testing.T) {
+	cache := newHandlerInflightCache(10)
+	cfg := &config.Config{}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{
+		Enabled: true, ReserveEstimates: true, TTLSeconds: 60, WaitTimeoutSeconds: 1, WaitMaxWaiting: 8,
+	}
+	billing := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billing.Stop)
+	key := &service.APIKey{ID: 1, User: &service.User{ID: 71, Status: service.StatusActive, Balance: 10}}
+	held, err := billing.ReserveInflight(context.Background(), key.User, nil, nil, 6)
+	require.NoError(t, err)
+	t.Cleanup(held.Release)
+	releaseTimer := time.AfterFunc(50*time.Millisecond, held.HandlerDone)
+	defer releaseTimer.Stop()
+	c := newInflightTestGinContext()
+	est := &countingEstimator{cost: 6, priced: true}
+	done, err := reserveInflightBalance(c, billing, est, key, nil, tokenInflightEstimate("claude-opus-5.5", nil))
+	require.NoError(t, err, "the gateway should resume after the hold is released instead of returning 429")
+	t.Cleanup(done)
+	require.Equal(t, 1, est.calls, "waiting must not reprocess or re-estimate the request body")
+	require.False(t, c.Writer.Written(), "admission must not commit headers or buffer/emit model content")
+	require.NotNil(t, service.InflightReservationFromContext(c.Request.Context()))
+	require.Equal(t, 1, cache.count(), "only one new hold belongs to this request")
+	done()
+	require.Zero(t, cache.count())
+}
+
 // 新接入的端点（独立 web_search）：在途预留超过余额时拒绝，且不残留预留。
 func TestWebSearch_RejectsWhenInflightExceedsBalance(t *testing.T) {
 	cache := newHandlerInflightCache(1.5)
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	billingCache := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingCache.Stop)
 	billing := service.NewBillingService(cfg, nil)

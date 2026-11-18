@@ -29,6 +29,9 @@ type AnthropicToResponsesOptions struct {
 	MinOutputTokens                int
 	DeferReasoningEffortValidation bool
 	ResponsesHistoryScope          string
+	// OnResponsesHistoryFallback signals visible replay when opaque history
+	// cannot be reused, so callers can discard stale continuation pointers.
+	OnResponsesHistoryFallback func()
 	// The caller must enforce stop sequences on the converted response.
 	StopSequencesHandledLocally bool
 }
@@ -53,7 +56,7 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 			return nil, err
 		}
 	}
-	input, err := convertAnthropicToResponsesInputWithHistory(req.System, req.Messages, options.ResponsesHistoryScope)
+	input, err := convertAnthropicToResponsesInputWithHistory(req.System, req.Messages, options.ResponsesHistoryScope, options.OnResponsesHistoryFallback)
 	if err != nil {
 		return nil, err
 	}
@@ -177,11 +180,12 @@ func anthropicParallelToolCalls(raw json.RawMessage) bool {
 // convertAnthropicToResponsesInput builds the Responses API input items array
 // from the Anthropic system field and message list.
 func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMessage) ([]ResponsesInputItem, error) {
-	return convertAnthropicToResponsesInputWithHistory(system, msgs, "")
+	return convertAnthropicToResponsesInputWithHistory(system, msgs, "", nil)
 }
 
-func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string) ([]ResponsesInputItem, error) {
+func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string, onFallback func()) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
+	var historyCalls map[string]struct{ id, outputType string }
 
 	// System prompt → developer role input item. ChatGPT Codex SSE behaves like
 	// Codex CLI here: keeping Anthropic system text in input preserves the
@@ -205,11 +209,23 @@ func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []
 		if m.Role == "assistant" {
 			var blocks []AnthropicContentBlock
 			if json.Unmarshal(m.Content, &blocks) == nil {
-				items, restored, err := restoreResponsesHistory(blocks, scope)
+				items, restored, err := restoreResponsesHistoryWithFallback(blocks, scope, onFallback)
 				if err != nil {
 					return nil, err
 				}
 				if restored {
+					for _, item := range items {
+						if item.Type != "function_call" && item.Type != "custom_tool_call" {
+							continue
+						}
+						if historyCalls == nil {
+							historyCalls = make(map[string]struct{ id, outputType string })
+						}
+						// Messages exposes legacy IDs without their old prefix and
+						// represents custom calls as tool_use. Restore each result's
+						// original ID and output kind along with its validated call.
+						historyCalls[fromResponsesCallID(item.CallID)] = struct{ id, outputType string }{item.CallID, item.Type + "_output"}
+					}
 					out = append(out, items...)
 					continue
 				}
@@ -218,6 +234,18 @@ func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []
 		items, err := anthropicMsgToResponsesItems(m)
 		if err != nil {
 			return nil, err
+		}
+		for index := range items {
+			item := &items[index]
+			switch item.Type {
+			case "function_call", "custom_tool_call":
+				delete(historyCalls, item.CallID)
+			case "function_call_output":
+				if original, ok := historyCalls[item.CallID]; ok {
+					delete(historyCalls, item.CallID)
+					item.CallID, item.Type = original.id, original.outputType
+				}
+			}
 		}
 		out = append(out, items...)
 	}
@@ -260,6 +288,16 @@ func anthropicMsgToResponsesItems(m AnthropicMessage) ([]ResponsesInputItem, err
 		return anthropicUserToResponses(m.Content)
 	case "assistant":
 		return anthropicAssistantToResponses(m.Content)
+	case "system":
+		// Mid-conversation system turns (e.g. hook output) keep system-level
+		// authority: Responses uses developer for them, not user.
+		items, err := anthropicUserToResponses(m.Content)
+		for i := range items {
+			if items[i].Role == "user" {
+				items[i].Role = "developer"
+			}
+		}
+		return items, err
 	default:
 		return anthropicUserToResponses(m.Content)
 	}

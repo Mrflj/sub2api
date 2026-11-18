@@ -470,6 +470,8 @@ type ResponsesOutput struct {
 
 	// type=web_search_call
 	Action *WebSearchAction `json:"action,omitempty"`
+	// Set only by an xAI-aware accumulator, never by upstream JSON.
+	serverSideSearch bool
 	// Exact upstream output is used only by the negotiated Messages history
 	// extension; it is never interpreted as a prompt or a client tool call.
 	rawOutput json.RawMessage

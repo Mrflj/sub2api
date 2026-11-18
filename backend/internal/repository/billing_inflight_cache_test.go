@@ -23,9 +23,12 @@ func newInflightTestEnv(t *testing.T, enabled bool, ttlSeconds int) (*miniredis.
 	cache := &billingCache{rdb: rdb}
 	cfg := &config.Config{}
 	cfg.Billing.InflightReservation = config.InflightReservationConfig{
-		Enabled:          enabled,
-		TTLSeconds:       ttlSeconds,
-		DefaultMaxTokens: 8192,
+		Enabled:            enabled,
+		ReserveEstimates:   true,
+		TTLSeconds:         ttlSeconds,
+		DefaultMaxTokens:   8192,
+		WaitTimeoutSeconds: 2,
+		WaitMaxWaiting:     8,
 	}
 	svc := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
@@ -103,6 +106,46 @@ func TestInflightReservation_FirstRequestAlwaysAdmitted(t *testing.T) {
 	release2, err := svc.ReserveInflightBalance(ctx, user, nil, nil, 0.001)
 	require.NoError(t, err)
 	release2()
+}
+
+func TestInflightReservation_WaitersUseAtomicRedisAdmission(t *testing.T) {
+	_, cache, svc := newInflightTestEnv(t, true, 60)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	key := &service.APIKey{ID: 9, User: &service.User{ID: 71, Status: service.StatusActive, Balance: 10}}
+	require.NoError(t, cache.SetUserBalance(ctx, key.User.ID, 10))
+	held, err := svc.ReserveInflight(ctx, key.User, nil, nil, 6)
+	require.NoError(t, err)
+	t.Cleanup(held.Release)
+	type result struct {
+		res *service.InflightReservation
+		err error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			res, err := svc.ReserveInflightWithWait(ctx, key, nil, 6, "")
+			results <- result{res, err}
+		}()
+	}
+	releaseTimer := time.AfterFunc(50*time.Millisecond, held.HandlerDone)
+	defer releaseTimer.Stop()
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-results:
+			require.NoError(t, got.err)
+			require.NotNil(t, got.res)
+			t.Cleanup(got.res.Release)
+			require.EqualValues(t, 1, inflightCount(t, cache, key.User.ID), "two waiting $6 requests must not both reserve a $10 balance")
+			got.res.HandlerDone()
+		case <-ctx.Done():
+			t.Fatal("waiting requests did not resume after reservation release")
+		}
+	}
+	require.Zero(t, inflightCount(t, cache, key.User.ID))
+	balance, err := cache.GetUserBalance(ctx, key.User.ID)
+	require.NoError(t, err)
+	require.Equal(t, 10.0, balance, "waiting and admission do not debit the balance")
 }
 
 func TestInflightReservation_TTLExpiryFreesLeakedReservation(t *testing.T) {
@@ -187,7 +230,7 @@ func TestInflightReservation_RedisDownFailsOpen(t *testing.T) {
 	downMR.Close()
 
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	svc := service.NewBillingCacheService(&downReserveCache{BillingCache: up, down: &billingCache{rdb: downRDB}}, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 

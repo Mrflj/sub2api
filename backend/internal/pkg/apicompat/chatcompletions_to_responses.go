@@ -27,9 +27,9 @@ func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, 
 	if err := validateChatRequestMedia(req); err != nil {
 		return nil, err
 	}
-	if req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Seed != nil || len(normalizedRawJSON(req.LogitBias)) > 0 || (req.N != nil && *req.N != 1) || len(normalizedRawJSON(req.Stop)) > 0 {
-		return nil, unsupportedRequestConversion("frequency_penalty, presence_penalty, seed, logit_bias, n other than 1 and stop have no equivalent in Responses; use a native Chat Completions endpoint to retain these generation controls")
-	}
+	// Compatibility mode maps supported controls below and omits frequency_penalty,
+	// presence_penalty, seed, logit_bias and stop, which have no Responses equivalent.
+	// Responses produces one choice regardless of n; do not fan out extra requests.
 	// Use one effective effort without changing the caller's field provenance.
 	// Legacy Responses ingress still distinguishes native reasoning from the
 	// flat Chat alias when deciding which top-level fields to replace.

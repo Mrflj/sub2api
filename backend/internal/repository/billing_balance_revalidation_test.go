@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -27,7 +28,7 @@ func TestInflightReservation_RedisStaleBalanceRecheckedAtOneDollarFiftyTwo(t *te
 	ctx := context.Background()
 	users := &inflightBalanceAuthorityStub{balance: 1.52}
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	svc := service.NewBillingCacheService(cache, users, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 	user := &service.User{ID: 71, Status: service.StatusActive, Balance: 1.52}
@@ -72,4 +73,31 @@ func TestInflightReservation_RedisBusyAtOneDollarFiftyTwoReleasesWithoutRecharge
 	require.NoError(t, err)
 	second.HandlerDone()
 	require.Zero(t, inflightCount(t, cache, user.ID))
+}
+
+func TestInflightReservation_RedisOldHoldsIgnoredWhenEstimatesDisabled(t *testing.T) {
+	_, cache, _ := newInflightTestEnv(t, true, 60)
+	ctx := context.Background()
+	user := &service.User{ID: 73, Status: service.StatusActive, Balance: 10}
+	require.NoError(t, cache.SetUserBalance(ctx, user.ID, 10))
+	allowed, _, err := cache.ReserveInflightBalance(ctx, user.ID, "old-request", 100, 10, time.Minute)
+	require.NoError(t, err)
+	require.True(t, allowed)
+	cfg := &config.Config{}
+	cfg.Billing.InflightReservation.Enabled = true
+	svc := service.NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(svc.Stop)
+	require.NoError(t, svc.CheckBillingEligibility(ctx, user, nil, nil, nil, ""))
+	res, err := svc.ReserveInflight(ctx, user, nil, nil, 7)
+	require.NoError(t, err)
+	require.Nil(t, res)
+	res.HandlerDone()
+	require.EqualValues(t, 1, inflightCount(t, cache, user.ID))
+	balance, err := cache.GetUserBalance(ctx, user.ID)
+	require.NoError(t, err)
+	require.Equal(t, 10.0, balance)
+
+	_, err = svc.ReserveFixedCharge(ctx, user, nil, nil, nil, 1)
+	require.ErrorIs(t, err, service.ErrInflightBalanceBusy, "known-price charges still account for existing monetary holds")
+	require.EqualValues(t, 1, inflightCount(t, cache, user.ID))
 }
