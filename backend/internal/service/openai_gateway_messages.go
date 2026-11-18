@@ -192,10 +192,12 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 	// A fixed tail can retain valid tool pairs while discarding the user task.
 	// Only a bound previous_response_id below permits sending the latest turn.
 	anthropicReq.Model = upstreamModel
+	historyFallback := false
 	responsesReq, err := apicompat.AnthropicToResponsesWithOptions(&anthropicReq, apicompat.AnthropicToResponsesOptions{
 		MinOutputTokens:                configuredMinOutputTokens(s.cfg),
 		DeferReasoningEffortValidation: true,
 		ResponsesHistoryScope:          openAIMessagesResponseHistoryScope(c, account, billingModel),
+		OnResponsesHistoryFallback:     func() { historyFallback = true },
 		StopSequencesHandledLocally:    true,
 	})
 	if err != nil {
@@ -203,6 +205,12 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 			writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		}
 		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
+	}
+	if historyFallback {
+		// A cached continuation represents the old assistant turn. Send the
+		// full visible history so compaction or client edits are not discarded.
+		previousResponseID = ""
+		s.invalidateOpenAICompatSessionHistory(ctx, c, account, promptCacheKey)
 	}
 
 	// Upstream always uses streaming (upstream may not support sync mode).
@@ -240,6 +248,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 			zap.Bool("compat_prompt_cache_key_injected", true),
 			zap.String("compat_prompt_cache_key_sha256", hashSensitiveValueForLog(promptCacheKey)),
 		)
+	}
+	if historyFallback {
+		logFields = append(logFields, zap.Bool("responses_history_visible_fallback", true))
 	}
 	if previousResponseID != "" {
 		logFields = append(logFields,
@@ -302,7 +313,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 		}
 		s.applyCodexAccountIdentityOrHarvestPinMap(ctx, account, codexAccountIdentitySource(c, account), apiKeyID, upstreamModel, reqBody, codexClientSessionID(c))
 		delete(reqBody, "prompt_cache_key")
-		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
+		if !historyFallback && shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
 			compatTurnState = s.getOpenAICompatSessionTurnState(ctx, c, account, promptCacheKey)
 		}
 		// OAuth codex transform forces stream=true upstream, so always use
@@ -446,6 +457,11 @@ func (s *OpenAIGatewayService) forwardAsAnthropic(
 	}
 	if account.UsesOpenAICodexProtocol() && promptCacheKey != "" && strings.TrimSpace(c.GetHeader("conversation_id")) == "" {
 		upstreamReq.Header.Del("conversation_id")
+	}
+	if historyFallback {
+		// Drop stale client-echoed turn state too. The current account's
+		// configured ticket is still applied by the normal path below.
+		upstreamReq.Header.Del(openAICodexTurnStateHeader)
 	}
 	if compatTurnState != "" && upstreamReq.Header.Get("x-codex-turn-state") == "" {
 		upstreamReq.Header.Set("x-codex-turn-state", compatTurnState)

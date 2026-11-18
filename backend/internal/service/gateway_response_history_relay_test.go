@@ -58,8 +58,12 @@ func TestResponsesHistoryRelayFilterPreservesMatchedProjection(t *testing.T) {
 	// Reproduce B -> A: the old emulation prefix collides with Responses ws_
 	// IDs, so B removed the visible pair but kept A's exact output capsule.
 	legacy := FilterWebSearchHistoryBlocks(body, "claude-opus-5-5")
-	_, err = convertResponsesHistoryRelay(t, legacy)
-	require.ErrorContains(t, err, "Responses history does not match the assistant message")
+	fallback, err := convertResponsesHistoryRelay(t, legacy)
+	require.NoError(t, err)
+	require.Contains(t, string(fallback.Input), "Synthetic progress.")
+	require.Contains(t, string(fallback.Input), "todo saved")
+	require.NotContains(t, string(fallback.Input), "fixture-provider-state")
+	require.NotContains(t, string(fallback.Input), "example.invalid/a", "a removed visible search cannot authorize stale hosted-state replay")
 	require.Contains(t, string(legacy), apicompat.ResponsesHistoryBlockType)
 	for _, header := range []string{"", "v2", "v1"} {
 		t.Run("negotiation="+header, func(t *testing.T) {
@@ -96,8 +100,11 @@ func TestResponsesHistoryRelayAdjacentAssistantBoundary(t *testing.T) {
 	require.NoError(t, err)
 	bad, err := sjson.SetRawBytes(body, "messages.1.content", merged)
 	require.NoError(t, err)
-	_, err = convertResponsesHistoryRelay(t, bad)
-	require.ErrorContains(t, err, "Responses history does not match the assistant message")
+	fallback, err := convertResponsesHistoryRelay(t, bad)
+	require.NoError(t, err)
+	require.Contains(t, string(fallback.Input), "Additional project context.")
+	require.Contains(t, string(fallback.Input), "todo saved")
+	require.NotContains(t, string(fallback.Input), "fixture-provider-state")
 
 	// Keep the additional assistant turn separate, even though roles repeat.
 	messages := gjson.GetBytes(body, "messages").Array()

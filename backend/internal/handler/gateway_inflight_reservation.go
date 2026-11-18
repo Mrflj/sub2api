@@ -93,7 +93,7 @@ func reserveInflightBalanceCtx(
 			return ctx, inflightNoop, funds.Check(ctx)
 		}
 	}
-	if billing == nil || estimator == nil || apiKey == nil || apiKey.User == nil || !billing.InflightReservationEnabled() {
+	if billing == nil || estimator == nil || apiKey == nil || apiKey.User == nil || !billing.EstimatedInflightReservationEnabled() {
 		return ctx, inflightNoop, nil
 	}
 	if apiKey.Group != nil && apiKey.Group.IsSubscriptionType() && subscription != nil {

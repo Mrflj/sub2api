@@ -24,6 +24,7 @@ func newInflightTestEnv(t *testing.T, enabled bool, ttlSeconds int) (*miniredis.
 	cfg := &config.Config{}
 	cfg.Billing.InflightReservation = config.InflightReservationConfig{
 		Enabled:            enabled,
+		ReserveEstimates:   true,
 		TTLSeconds:         ttlSeconds,
 		DefaultMaxTokens:   8192,
 		WaitTimeoutSeconds: 2,
@@ -229,7 +230,7 @@ func TestInflightReservation_RedisDownFailsOpen(t *testing.T) {
 	downMR.Close()
 
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: 60}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: 60}
 	svc := service.NewBillingCacheService(&downReserveCache{BillingCache: up, down: &billingCache{rdb: downRDB}}, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 

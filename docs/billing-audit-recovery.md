@@ -92,6 +92,20 @@ pending; an unchecked/absent invalidator cannot acknowledge key-quota exhaustion
 
 ## Positive-balance admission failures
 
+Ordinary inference no longer reserves estimated request costs by default:
+`billing.inflight_reservation.reserve_estimates` defaults to `false`, including
+deployments with the existing master `enabled: true` setting. Admission skips
+estimation, reservation waits and fail-closed unpriced-model checks. Old estimated
+Redis holds therefore stop blocking these requests as soon as the new process
+starts; they are not bulk-deleted or refunded. Actual balance eligibility,
+minimum-balance floors, subscriptions, key/platform limits and actual-usage
+billing remain in effect. Without estimated holds, concurrent usage can settle
+into a negative balance. Fixed, known-price charges retain their reservation
+protection under the master switch.
+
+The estimated-reservation behavior below applies only when both `enabled` and
+`reserve_estimates` are explicitly `true`.
+
 The displayed database balance is distinct from Redis's cached balance and
 estimated reservations for requests still in flight. A reservation never debits
 the database. Before rejecting a cached balance, admission rechecks the database
@@ -133,8 +147,12 @@ failures, correlate the B gateway's request ID with
 
 ## Failed-request Reservation Cleanup
 
-A local conversion failure such as `Responses history does not match the
-assistant message` returns no billable upstream result. The handler's deferred
+The cleanup rules below apply to fixed-price holds and explicitly enabled
+estimated holds. With estimates disabled, ordinary inference creates no hold to
+release, and actual-usage settlement does not require a reservation handle.
+
+A local conversion failure such as `invalid Responses history state` returns
+no billable upstream result. The handler's deferred
 completion releases its reservation; an unrelated request's pending billing
 keeps its own hold. Reservations do not debit the database, so releasing one
 does not issue a refund.
@@ -154,3 +172,36 @@ release still takes one cache call. Persistent failure logs the scope and
 minutes by default). Existing orphaned holds cannot be identified safely by
 an error status alone; never clear all of a user's holds while billing or
 generation is still active.
+
+## Visible-history Compatibility Fallback
+
+A valid optional Responses-history capsule that no longer matches the client's
+visible assistant content does not return `Responses history does not match the
+assistant message`. That turn is converted from the current visible text and
+tool calls; following tool results retain their matching call IDs. Visible
+hosted-search queries and results are carried as historical text rather than
+recreated as native provider calls. The stale capsule and that turn's opaque
+thinking signatures are not replayed.
+
+On this fallback, the request carries the full converted client history without
+an old `previous_response_id`; otherwise continuation trimming could discard
+the client's edited or compacted context. This is a local conversion fallback,
+not an additional model invocation. A successful request follows ordinary usage
+settlement and reservation cleanup. The affected request may lose provider-side
+reasoning/cache reuse; exactly matching history still uses lossless replay and
+normal continuation behavior.
+
+Account/model scope changes also notify the visible-history fallback path. The
+affected account/key/session's cached response ID and turn state are invalidated
+before dispatch, including when that dispatch later fails. This prevents a later
+capsule-free retry from resuming an older conversation. The existing
+continuation-disabled flag is preserved. Stale client-echoed turn state is
+removed for this fallback; the current account's configured ticket is still
+applied through the ordinary authorization path. Other keys/accounts/sessions
+retain their own bindings, and matching history retains normal state reuse.
+
+Relay matching stays strict: successful compatibility conversion is not evidence
+that a capsule matches. Duplicate, oversized or malformed capsules and invalid
+privileged output items retain their validation errors; empty capsules also
+cannot conceal duplicate capsules. Account/model
+scope isolation is unchanged.

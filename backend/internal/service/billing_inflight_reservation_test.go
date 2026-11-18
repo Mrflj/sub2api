@@ -50,6 +50,7 @@ func TestEstimateInflightReservationCost(t *testing.T) {
 func TestReserveInflightBalance_NoReservationCacheFailsOpen(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Billing.InflightReservation.Enabled = true
+	cfg.Billing.InflightReservation.ReserveEstimates = true
 	svc := NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 	release, err := svc.ReserveInflightBalance(context.Background(), &User{ID: 1}, nil, nil, 100)
@@ -60,6 +61,7 @@ func TestReserveInflightBalance_NoReservationCacheFailsOpen(t *testing.T) {
 func TestReserveInflightBalance_SimpleModeDisabled(t *testing.T) {
 	cfg := &config.Config{RunMode: config.RunModeSimple}
 	cfg.Billing.InflightReservation.Enabled = true
+	cfg.Billing.InflightReservation.ReserveEstimates = true
 	svc := NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 	require.False(t, svc.InflightReservationEnabled())
@@ -72,7 +74,7 @@ func TestReserveInflightBalance_SimpleModeDisabled(t *testing.T) {
 func newInflightEstimateGateway(t *testing.T, channelService *ChannelService) *GatewayService {
 	t.Helper()
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, DefaultMaxTokens: 1000, MaxInputTokens: 200000, MaxOutputTokens: 128000}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, DefaultMaxTokens: 1000, MaxInputTokens: 200000, MaxOutputTokens: 128000}
 	billing := NewBillingService(cfg, nil)
 	return &GatewayService{
 		cfg:            cfg,
@@ -251,7 +253,7 @@ func (m *memInflightCache) count() int {
 func newInflightSvc(t *testing.T, cache BillingCache, ttlSeconds int) *BillingCacheService {
 	t.Helper()
 	cfg := &config.Config{}
-	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, TTLSeconds: ttlSeconds}
+	cfg.Billing.InflightReservation = config.InflightReservationConfig{Enabled: true, ReserveEstimates: true, TTLSeconds: ttlSeconds}
 	svc := NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(svc.Stop)
 	return svc

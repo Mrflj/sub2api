@@ -957,12 +957,16 @@ type BillingConfig struct {
 	InflightReservation InflightReservationConfig `mapstructure:"inflight_reservation"`
 }
 
-// InflightReservationConfig 余额模式在途预留配置。
-// 准入时按 输入估算 + 输出单价 × max_tokens 估算单请求费用，在 Redis 中原子地
+// InflightReservationConfig 在途费用预留配置，已知金额费用默认保留预留保护。
+// 普通推理的估算费用预留默认关闭；显式启用 ReserveEstimates 后，按
+// 输入估算 + 输出单价 × max_tokens 估算单请求费用，在 Redis 中原子地
 // 校验 缓存余额 - 在途预留合计 >= 估算 后登记预留，请求结束（任意路径）释放。
 // 估算失败或 Redis 不可用时 fail-open，退回旧的仅余额 > 阈值检查。
 type InflightReservationConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+	// ReserveEstimates opts ordinary inference into estimated-cost reservations.
+	// Fixed, known-price charges keep their reservation guard independently.
+	ReserveEstimates bool `mapstructure:"reserve_estimates"`
 	// WaitTimeoutSeconds bounds gateway admission waits for temporary reservation contention; 0 disables waiting.
 	WaitTimeoutSeconds int `mapstructure:"wait_timeout_seconds"`
 	// WaitMaxWaiting limits reservation waiters per user in each process; 0 disables waiting.
@@ -2465,6 +2469,7 @@ func setDefaults() {
 	viper.SetDefault("billing.user_platform_quota_cache_ttl_seconds", 86400)
 	viper.SetDefault("billing.user_platform_quota_sentinel_ttl_seconds", 3600)
 	viper.SetDefault("billing.inflight_reservation.enabled", true)
+	viper.SetDefault("billing.inflight_reservation.reserve_estimates", false)
 	viper.SetDefault("billing.inflight_reservation.wait_timeout_seconds", 30)
 	viper.SetDefault("billing.inflight_reservation.wait_max_waiting", 8)
 	viper.SetDefault("billing.inflight_reservation.ttl_seconds", 900)

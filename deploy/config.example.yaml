@@ -1320,7 +1320,10 @@ billing:
   # Cache TTL (seconds) for per-user × per-platform quota records
   # 用户 × 平台 quota 缓存 TTL（秒），默认 86400=1天，覆盖典型 daily 窗口
   user_platform_quota_cache_ttl_seconds: 86400
-  # In-flight balance reservation (Redis): at admission, estimate per-request cost
+  # Fixed known-price charges retain their Redis reservation guard. Ordinary
+  # inference does not reserve estimated costs unless reserve_estimates is true.
+  # 已知金额费用保留 Redis 预留保护；普通推理默认不按估算费用预留或等待。
+  # When explicitly enabled for estimates: at admission, estimate per-request cost
   # (input estimate + output price x max_tokens) and atomically require
   # cached_balance - in-flight reservations >= estimate. A rejection is checked
   # against the DB balance and retried atomically once before it is returned.
@@ -1333,6 +1336,12 @@ billing:
   # 用户无在途请求时始终放行（与旧行为一致）；估算失败/Redis 不可用时 fail-open。
   inflight_reservation:
     enabled: true
+    # Opt in to estimated-cost reservations for ordinary inference requests.
+    # Disabled by default: old estimated holds do not block these requests.
+    # 普通推理是否启用预估费用预留，默认关闭；旧预留不再阻挡普通推理。
+    # Without it, concurrent requests may settle into a negative balance.
+    # 关闭后，并发请求可能在结算时产生负余额。
+    reserve_estimates: false
     # Wait only on temporary contention; 0 disables waiting. Maximum 300 seconds.
     # 临时预留占用的最长等待秒数；0 禁用等待，最大 300 秒。正常请求不等待。
     wait_timeout_seconds: 30

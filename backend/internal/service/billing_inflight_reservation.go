@@ -256,6 +256,12 @@ func (s *BillingCacheService) InflightReservationEnabled() bool {
 	return ok
 }
 
+// EstimatedInflightReservationEnabled 是否为普通请求预留估算费用（默认关闭）。
+func (s *BillingCacheService) EstimatedInflightReservationEnabled() bool {
+	cfg, ok := s.inflightReservationConfig()
+	return ok && cfg.ReserveEstimates
+}
+
 // InflightReservationFailClosedOnUnpriced 无法估算费用时是否拒绝请求（默认 false = fail-open）。
 func (s *BillingCacheService) InflightReservationFailClosedOnUnpriced() bool {
 	cfg, ok := s.inflightReservationConfig()
@@ -280,7 +286,7 @@ func (s *BillingCacheService) ReserveInflightBalance(ctx context.Context, user *
 // 调用方须在 handler 结束时调用 HandlerDone（nil 安全）。
 //
 // 以下情况直接放行且不登记预留（fail-open，保持旧行为）：
-// 开关关闭 / 简易模式 / 订阅模式 / estimate <= 0 / 缓存不支持 / 余额读取失败 / Redis 执行失败。
+// 估算预留关闭（默认）/ 简易模式 / 订阅模式 / estimate <= 0 / 缓存不支持 / 余额读取失败 / Redis 执行失败。
 // Redis 判定余额不足以覆盖已有预留和 estimate 时，先回源数据库复核并原子重试一次；
 // 真实余额耗尽返回 ErrInsufficientBalance，临时预留占用返回 ErrInflightBalanceBusy。
 func (s *BillingCacheService) ReserveInflight(ctx context.Context, user *User, group *Group, subscription *UserSubscription, estimate float64) (*InflightReservation, error) {
@@ -333,7 +339,7 @@ func (s *BillingCacheService) reserveInflightScope(ctx context.Context, res *Inf
 
 func (s *BillingCacheService) reserveInflight(ctx context.Context, user *User, group *Group, subscription *UserSubscription, estimate float64, renew, capped bool) (*InflightReservation, error) {
 	cfg, ok := s.inflightReservationConfig()
-	if !ok || user == nil {
+	if !ok || user == nil || capped && !cfg.ReserveEstimates {
 		return nil, nil
 	}
 	if group != nil && group.IsSubscriptionType() && subscription != nil {

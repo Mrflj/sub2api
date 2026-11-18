@@ -92,15 +92,11 @@ func TestResponsesHistoryForeignCiphertextIsolationDoesNotDependOnPrefix(t *test
 	require.Contains(t, string(replay.Input), "todo_write")
 }
 
-func TestResponsesHistoryRejectsChangedOrPrivilegedReplay(t *testing.T) {
+func TestResponsesHistoryRejectsDuplicateOrPrivilegedReplay(t *testing.T) {
 	original := historyFixture(t)
 	converted := ResponsesToAnthropic(original, "claude-alias")
 	require.True(t, AttachResponsesHistory(converted, original, historyTestScope))
 	for _, mutate := range []func([]AnthropicContentBlock) []AnthropicContentBlock{
-		func(blocks []AnthropicContentBlock) []AnthropicContentBlock {
-			blocks[3].Text = "Changed answer."
-			return blocks
-		},
 		func(blocks []AnthropicContentBlock) []AnthropicContentBlock {
 			return append(blocks, blocks[len(blocks)-1])
 		},
@@ -319,7 +315,7 @@ func TestResponsesHistoryDiagnosticsContainOnlyStatusAndStructuralCounts(t *test
 	require.NotContains(t, string(encoded), "example.invalid")
 }
 
-func TestResponsesHistoryHostedPairIdentityAndContentsRemainStrict(t *testing.T) {
+func TestResponsesHistoryHostedPairMismatchFallsBackWithoutExactReplay(t *testing.T) {
 	original := historyFixture(t)
 	for name, mutate := range map[string]func([]AnthropicContentBlock) []AnthropicContentBlock{
 		"changed query": func(b []AnthropicContentBlock) []AnthropicContentBlock {
@@ -341,8 +337,15 @@ func TestResponsesHistoryHostedPairIdentityAndContentsRemainStrict(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			converted := ResponsesToAnthropic(original, "claude-alias")
 			require.True(t, AttachResponsesHistory(converted, original, historyTestScope))
-			_, err := historyReplay(t, mutate(converted.Content), historyTestScope)
-			require.Error(t, err)
+			blocks := mutate(converted.Content)
+			content, err := json.Marshal(blocks)
+			require.NoError(t, err)
+			require.False(t, ResponsesHistoryMatchesAssistantContent(content), "the exact-replay check stays strict")
+			replay, err := historyReplay(t, blocks, historyTestScope)
+			require.NoError(t, err)
+			require.NotContains(t, string(replay.Input), "gAAAA_fixture")
+			require.NotContains(t, string(replay.Input), `"type":"web_search_call"`)
+			require.NotContains(t, string(replay.Input), "ACTUAL_NATIVE_SIGNATURE_NOT_IN_PROVIDER_STATE")
 		})
 	}
 }
@@ -354,9 +357,11 @@ func TestResponsesHistoryLargeToolArgumentsRemainExact(t *testing.T) {
 	converted := ResponsesToAnthropic(original, "claude-alias")
 	require.True(t, AttachResponsesHistory(converted, original, historyTestScope))
 	converted.Content[0].Input = json.RawMessage(`{"value":9007199254740992}`)
-	_, restored, err := restoreResponsesHistory(converted.Content, historyTestScope)
-	require.False(t, restored)
-	require.Error(t, err)
+	items, restored, err := restoreResponsesHistory(converted.Content, historyTestScope)
+	require.True(t, restored)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, `{"value":9007199254740992}`, items[0].Arguments, "fallback uses the client's current arguments, not the stale capsule")
 }
 
 func TestResponsesHistoryRefreshedCiphertextPreservesOnlyObservedSignatureProvenance(t *testing.T) {
@@ -425,8 +430,15 @@ func TestResponsesHistorySignatureProvenanceRejectsInvalidOrUnobservedClaims(t *
 			var err error
 			blocks[len(blocks)-1].Content, err = json.Marshal(state)
 			require.NoError(t, err)
-			_, _, err = restoreResponsesHistory(blocks, historyTestScope)
-			require.Error(t, err)
+			items, _, err := restoreResponsesHistory(blocks, historyTestScope)
+			if name == "changed native signature" || name == "different signature hash" {
+				require.NoError(t, err)
+				for _, item := range items {
+					require.NotEqual(t, "reasoning", item.Type, "unobserved claims cannot authorize ciphertext replay")
+				}
+			} else {
+				require.Error(t, err, "malformed provenance remains invalid")
+			}
 		})
 	}
 	var signature responsesHistorySignature

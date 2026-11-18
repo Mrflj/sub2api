@@ -253,6 +253,33 @@ func (s *OpenAIGatewayService) deleteOpenAICompatSessionResponseID(_ context.Con
 	s.openaiCompatSessionResponses.Store(key, binding)
 }
 
+// invalidateOpenAICompatSessionHistory drops stale conversation pointers after
+// visible-history fallback without re-enabling an unsupported continuation API.
+func (s *OpenAIGatewayService) invalidateOpenAICompatSessionHistory(_ context.Context, c *gin.Context, account *Account, promptCacheKey string) {
+	if s == nil {
+		return
+	}
+	key := openAICompatSessionResponseKey(c, account, promptCacheKey)
+	if key == "" {
+		return
+	}
+	for {
+		raw, ok := s.openaiCompatSessionResponses.Load(key)
+		if !ok {
+			return
+		}
+		binding, ok := raw.(openAICompatSessionResponseBinding)
+		if !ok {
+			s.openaiCompatSessionResponses.Delete(key)
+			return
+		}
+		binding.ResponseID, binding.TurnState = "", ""
+		if s.openaiCompatSessionResponses.CompareAndSwap(key, raw, binding) {
+			return
+		}
+	}
+}
+
 func (s *OpenAIGatewayService) disableOpenAICompatSessionContinuation(_ context.Context, c *gin.Context, account *Account, promptCacheKey string) {
 	if s == nil {
 		return

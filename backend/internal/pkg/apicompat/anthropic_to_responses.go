@@ -29,6 +29,9 @@ type AnthropicToResponsesOptions struct {
 	MinOutputTokens                int
 	DeferReasoningEffortValidation bool
 	ResponsesHistoryScope          string
+	// OnResponsesHistoryFallback signals visible replay when opaque history
+	// cannot be reused, so callers can discard stale continuation pointers.
+	OnResponsesHistoryFallback func()
 	// The caller must enforce stop sequences on the converted response.
 	StopSequencesHandledLocally bool
 }
@@ -53,7 +56,7 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 			return nil, err
 		}
 	}
-	input, err := convertAnthropicToResponsesInputWithHistory(req.System, req.Messages, options.ResponsesHistoryScope)
+	input, err := convertAnthropicToResponsesInputWithHistory(req.System, req.Messages, options.ResponsesHistoryScope, options.OnResponsesHistoryFallback)
 	if err != nil {
 		return nil, err
 	}
@@ -177,10 +180,10 @@ func anthropicParallelToolCalls(raw json.RawMessage) bool {
 // convertAnthropicToResponsesInput builds the Responses API input items array
 // from the Anthropic system field and message list.
 func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMessage) ([]ResponsesInputItem, error) {
-	return convertAnthropicToResponsesInputWithHistory(system, msgs, "")
+	return convertAnthropicToResponsesInputWithHistory(system, msgs, "", nil)
 }
 
-func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string) ([]ResponsesInputItem, error) {
+func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string, onFallback func()) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 	var historyCalls map[string]struct{ id, outputType string }
 
@@ -206,7 +209,7 @@ func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []
 		if m.Role == "assistant" {
 			var blocks []AnthropicContentBlock
 			if json.Unmarshal(m.Content, &blocks) == nil {
-				items, restored, err := restoreResponsesHistory(blocks, scope)
+				items, restored, err := restoreResponsesHistoryWithFallback(blocks, scope, onFallback)
 				if err != nil {
 					return nil, err
 				}
