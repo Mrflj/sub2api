@@ -76,6 +76,9 @@ func responsesToAnthropic(resp *ResponsesResponse, model string, preservePhase b
 				Input: sanitizeAnthropicToolUseInput(item.Name, item.Arguments),
 			})
 		case "custom_tool_call":
+			if item.serverSideSearch {
+				continue
+			}
 			blocks = append(blocks, AnthropicContentBlock{
 				Type: "tool_use", ID: fromResponsesCallID(item.CallID), Name: item.Name,
 				Input: json.RawMessage(responsesAnthropicCustomToolInput(item.Input)),
@@ -215,6 +218,11 @@ type ResponsesEventToAnthropicState struct {
 	// emitted as signature_delta before the thinking block is closed.
 	PendingThinkingSignature string
 	HasToolCall              bool
+
+	// XAIServerSideSearch is set by callers whose upstream is xAI. A
+	// custom_tool_call that IsServerSideSearchCall then never becomes a tool_use
+	// block, because xAI runs it itself.
+	XAIServerSideSearch bool
 
 	// OutputIndexToBlockIdx maps Responses output_index → Anthropic content block index.
 	OutputIndexToBlockIdx map[int]int
@@ -406,6 +414,9 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 	// function_call 与 custom_tool_call（custom/freeform 工具，如新版 apply_patch）
 	// 同样映射为 Anthropic 的 tool_use 块。
 	case "function_call", "custom_tool_call":
+		if state.XAIServerSideSearch && IsServerSideSearchCall(evt.Item.Type, evt.Item.CallID) {
+			return nil
+		}
 		var events []AnthropicStreamEvent
 		events = append(events, closeCurrentBlock(state)...)
 

@@ -125,3 +125,26 @@ func TestOpenAIAgentDisabledOwnerWebsocketKeepsIntegrityProtection(t *testing.T)
 	require.ErrorAs(t, err, &refused)
 	require.Equal(t, "agent_item_count_changed", refused.RejectionReason)
 }
+
+func TestOpenAIAgentDisabledOwnerNativeCompactionKeepsIntactHistory(t *testing.T) {
+	svc, _, ctx, _, old := issue758WaitFixture(t, nil)
+	request := openAIAgentRecoveryFromContext(ctx)
+	old.Schedulable = false
+	require.NoError(t, svc.releaseDisabledOpenAIAgentOwner(ctx, request))
+	request.nativeCompaction = true
+	request.disallowLearning = true
+	next := *old
+	next.ID, next.Schedulable = 2, true
+	for _, body := range []string{issue715OpaqueBody, `{"model":"gpt-6-astra","input":[]}`} {
+		req, err := http.NewRequest(http.MethodPost, "https://replacement.example/v1/responses", bytes.NewBufferString(body))
+		require.NoError(t, err)
+		complete, err := svc.prepareOpenAIAgentRecoveryAttempt(ctx, &next, req)
+		if body != issue715OpaqueBody {
+			require.Error(t, err, "changing accounts must not authorize changing protected history")
+			continue
+		}
+		require.NoError(t, err)
+		complete(true)
+		require.Nil(t, request.delivery, "compaction must not learn replacement ownership")
+	}
+}

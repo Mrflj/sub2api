@@ -154,11 +154,17 @@ func TestRegionalUnlimitedUserTracksWithoutAdmissionBudget(t *testing.T) {
 			require.True(t, result.Acquired)
 			t.Cleanup(result.ReleaseFunc)
 			// SQL holds limited slots; Redis holds unlimited activity.
-			mock.ExpectQuery("SELECT .* FROM regional_.*").WillReturnRows(sqlmock.NewRows([]string{"used"}).AddRow(2))
+			expectLoadRead := func() {
+				columns := []string{"lease_id", "version", "identity", "state", "user_id", "source", "fresh"}
+				mock.ExpectQuery("FROM regional_live_handoffs").WillReturnRows(sqlmock.NewRows(columns))
+				mock.ExpectQuery("SELECT .* FROM regional_.*").WillReturnRows(sqlmock.NewRows([]string{"used"}).AddRow(2))
+				mock.ExpectQuery("FROM regional_live_handoffs").WillReturnRows(sqlmock.NewRows(columns))
+			}
+			expectLoadRead()
 			count, err := wrapped.GetUserConcurrency(context.Background(), 42)
 			require.NoError(t, err)
 			require.Equal(t, 3, count)
-			mock.ExpectQuery("SELECT .* FROM regional_.*").WillReturnRows(sqlmock.NewRows([]string{"used"}).AddRow(2))
+			expectLoadRead()
 			loads, err := wrapped.GetUsersLoadBatch(context.Background(), []service.UserWithConcurrency{{ID: 42}})
 			require.NoError(t, err)
 			require.Equal(t, 3, loads[42].CurrentConcurrency)
