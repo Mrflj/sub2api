@@ -60,6 +60,12 @@ var (
 		local count = redis.call('ZCARD', KEYS[1])
 		local amount = tonumber(ARGV[4])
 		local balance = tonumber(ARGV[5])
+		-- A client retry after a lost reply must confirm the committed hold,
+		-- not reject this request against its own reservation.
+		local own = redis.call('HGET', KEYS[2], ARGV[3])
+		if own and tonumber(own) == amount and redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+			return {1, tostring(sum - tonumber(own)), count - 1}
+		end
 		if count > 0 and (balance - sum) < amount then
 			return {0, tostring(sum), count}
 		end
@@ -114,6 +120,10 @@ var (
 		local sum = 0
 		for i = 1, #vals do
 			sum = sum + (tonumber(vals[i]) or 0)
+		end
+		local own = redis.call('HGET', KEYS[2], ARGV[3])
+		if own and tonumber(own) == tonumber(ARGV[4]) and redis.call('ZSCORE', KEYS[1], ARGV[3]) then
+			return tostring(sum - tonumber(own))
 		end
 		redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), ARGV[3])
 		redis.call('HSET', KEYS[2], ARGV[3], ARGV[4])

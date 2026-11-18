@@ -130,3 +130,27 @@ Redis instances or logical databases isolate these caches. For historical
 failures, correlate the B gateway's request ID with
 `gateway.billing_eligibility_check_failed` or
 `gateway.inflight_reservation_rejected` before asserting a specific cause.
+
+## Failed-request Reservation Cleanup
+
+A local conversion failure such as `Responses history does not match the
+assistant message` returns no billable upstream result. The handler's deferred
+completion releases its reservation; an unrelated request's pending billing
+keeps its own hold. Reservations do not debit the database, so releasing one
+does not issue a refund.
+
+Redis admission is idempotent for the same request ID and amount: replay after
+a lost reply confirms the existing hold without counting it against itself.
+When an admission call fails with an uncertain result, cleanup explicitly removes
+only that attempt's reservation ID, including database-recheck and fixed-charge
+scope paths. Initial fail-open behavior and database-recheck error handling are
+unchanged.
+
+Release makes at most three attempts, each with an independent two-second
+deadline and short bounded backoff. It is detached from client cancellation;
+one scope's failure cannot consume another scope's cleanup deadline. Normal
+release still takes one cache call. Persistent failure logs the scope and
+`reservation_id`, stops renewal, and retains the existing TTL fallback (15
+minutes by default). Existing orphaned holds cannot be identified safely by
+an error status alone; never clear all of a user's holds while billing or
+generation is still active.

@@ -182,6 +182,7 @@ func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMe
 
 func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []AnthropicMessage, scope string) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
+	var historyCalls map[string]struct{ id, outputType string }
 
 	// System prompt → developer role input item. ChatGPT Codex SSE behaves like
 	// Codex CLI here: keeping Anthropic system text in input preserves the
@@ -210,6 +211,18 @@ func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []
 					return nil, err
 				}
 				if restored {
+					for _, item := range items {
+						if item.Type != "function_call" && item.Type != "custom_tool_call" {
+							continue
+						}
+						if historyCalls == nil {
+							historyCalls = make(map[string]struct{ id, outputType string })
+						}
+						// Messages exposes legacy IDs without their old prefix and
+						// represents custom calls as tool_use. Restore each result's
+						// original ID and output kind along with its validated call.
+						historyCalls[fromResponsesCallID(item.CallID)] = struct{ id, outputType string }{item.CallID, item.Type + "_output"}
+					}
 					out = append(out, items...)
 					continue
 				}
@@ -218,6 +231,18 @@ func convertAnthropicToResponsesInputWithHistory(system json.RawMessage, msgs []
 		items, err := anthropicMsgToResponsesItems(m)
 		if err != nil {
 			return nil, err
+		}
+		for index := range items {
+			item := &items[index]
+			switch item.Type {
+			case "function_call", "custom_tool_call":
+				delete(historyCalls, item.CallID)
+			case "function_call_output":
+				if original, ok := historyCalls[item.CallID]; ok {
+					delete(historyCalls, item.CallID)
+					item.CallID, item.Type = original.id, original.outputType
+				}
+			}
 		}
 		out = append(out, items...)
 	}

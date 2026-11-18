@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"sort"
@@ -532,7 +533,10 @@ func StripEmptyTextBlocks(body []byte) []byte {
 	}
 
 	var messages []any
-	if err := json.Unmarshal(sliceRawFromBody(body, msgsRes), &messages); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(sliceRawFromBody(body, msgsRes)))
+	decoder.UseNumber()
+	var extra any
+	if err := decoder.Decode(&messages); err != nil || decoder.Decode(&extra) != io.EOF {
 		return body
 	}
 
@@ -757,7 +761,10 @@ func FilterThinkingBlocksForRetry(body []byte, mappedModel string) []byte {
 	}
 
 	var messages []any
-	if err := json.Unmarshal(sliceRawFromBody(body, msgsRes), &messages); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(sliceRawFromBody(body, msgsRes)))
+	decoder.UseNumber()
+	var extra any
+	if err := decoder.Decode(&messages); err != nil || decoder.Decode(&extra) != io.EOF {
 		return body
 	}
 
@@ -1431,7 +1438,10 @@ func filterThinkingBlocksInternal(body []byte, alwaysThinking bool) []byte {
 	}
 
 	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var extra any
+	if err := decoder.Decode(&req); err != nil || decoder.Decode(&extra) != io.EOF {
 		return body
 	}
 

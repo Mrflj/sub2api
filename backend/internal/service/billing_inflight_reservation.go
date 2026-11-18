@@ -27,6 +27,7 @@ type InflightBalanceReservationCache interface {
 	// ReserveInflightBalance 原子地：清理过期预留；若用户已有在途预留且
 	// balance - sum(在途) < amount 则拒绝；否则登记 requestID 的预留（ttl 后自动失效）。
 	// 返回是否放行以及登记前的在途合计。
+	// 同一 requestID / amount 重放须幂等确认已有预留，不把自身计入其他请求的在途合计。
 	ReserveInflightBalance(ctx context.Context, userID int64, requestID string, amount, balance float64, ttl time.Duration) (bool, float64, error)
 	// ReleaseInflightBalance 释放 requestID 的预留（幂等）。
 	ReleaseInflightBalance(ctx context.Context, userID int64, requestID string) error
@@ -52,6 +53,8 @@ const (
 	defaultInflightReservationTTL      = 15 * time.Minute
 	defaultInflightDefaultMaxTokens    = 8192
 	inflightReservationReleaseTimeout  = 2 * time.Second
+	inflightReservationReleaseAttempts = 3
+	inflightReservationReleaseBackoff  = 50 * time.Millisecond
 	inflightReservationReserveTimeout  = 2 * time.Second
 	inflightReservationRenewTimeout    = 2 * time.Second
 	inflightInputBytesPerTokenEstimate = 4
@@ -135,19 +138,39 @@ func (r *InflightReservation) Release() {
 	r.stopRenewal()
 	r.releaseOnce.Do(func() {
 		r.refs.Store(0)
-		relCtx, relCancel := context.WithTimeout(context.Background(), inflightReservationReleaseTimeout)
-		defer relCancel()
 		if r.cache != nil {
-			if err := r.cache.ReleaseInflightBalance(relCtx, r.userID, r.requestID); err != nil {
-				logger.LegacyPrintf("service.billing_cache", "Warning: inflight reservation release failed for user %d (expires by ttl): %v", r.userID, err)
-			}
+			releaseInflightReservation("user:"+strconv.FormatInt(r.userID, 10), r.requestID, func(ctx context.Context) error {
+				return r.cache.ReleaseInflightBalance(ctx, r.userID, r.requestID)
+			})
 		}
 		for _, scope := range r.scopes {
-			if err := r.scopeCache.ReleaseInflightScope(relCtx, scope, r.requestID); err != nil {
-				logger.LegacyPrintf("service.billing_cache", "Warning: inflight reservation release failed for %s (expires by ttl): %v", scope, err)
-			}
+			releaseInflightReservation(scope, r.requestID, func(ctx context.Context) error {
+				return r.scopeCache.ReleaseInflightScope(ctx, scope, r.requestID)
+			})
 		}
 	})
+}
+
+// Cleanup is idempotent and independent of the request's cancellation. Give
+// each attempt its own deadline: a timed-out balance release must not prevent
+// the retry or another scope's cleanup. Persistent outages still fall back to TTL.
+func releaseInflightReservation(scope, requestID string, release func(context.Context) error) {
+	for attempt := 1; attempt <= inflightReservationReleaseAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), inflightReservationReleaseTimeout)
+		err := release(ctx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				logger.LegacyPrintf("service.billing_cache", "inflight reservation release recovered: scope=%s reservation_id=%s attempts=%d", scope, requestID, attempt)
+			}
+			return
+		}
+		if attempt == inflightReservationReleaseAttempts {
+			logger.LegacyPrintf("service.billing_cache", "Warning: inflight reservation release failed (expires by ttl): scope=%s reservation_id=%s attempts=%d error=%v", scope, requestID, attempt, err)
+			return
+		}
+		time.Sleep(time.Duration(attempt) * inflightReservationReleaseBackoff)
+	}
 }
 
 func (r *InflightReservation) decRef() {
@@ -297,6 +320,10 @@ func (s *BillingCacheService) reserveInflightScope(ctx context.Context, res *Inf
 	cancel()
 	if err != nil {
 		logger.LegacyPrintf("service.billing_cache", "Warning: inflight reservation failed for %s (fail-open): %v", scope, err)
+		// Redis may have registered the hold before its response was lost.
+		releaseInflightReservation(scope, res.requestID, func(ctx context.Context) error {
+			return sc.ReleaseInflightScope(ctx, scope, res.requestID)
+		})
 		return res, 0
 	}
 	res.scopeCache = sc
@@ -339,6 +366,9 @@ func (s *BillingCacheService) reserveInflight(ctx context.Context, user *User, g
 	cancel()
 	if err != nil {
 		logger.LegacyPrintf("service.billing_cache", "Warning: inflight reservation failed for user %d (fail-open): %v", user.ID, err)
+		releaseInflightReservation("user:"+strconv.FormatInt(user.ID, 10), requestID, func(ctx context.Context) error {
+			return rc.ReleaseInflightBalance(ctx, user.ID, requestID)
+		})
 		return nil, nil
 	}
 	if !allowed {
@@ -362,6 +392,9 @@ func (s *BillingCacheService) reserveInflight(ctx context.Context, user *User, g
 			allowed, inflight, err = rc.ReserveInflightBalance(reserveCtx, user.ID, requestID, estimate, balance, ttl)
 			cancel()
 			if err != nil {
+				releaseInflightReservation("user:"+strconv.FormatInt(user.ID, 10), requestID, func(ctx context.Context) error {
+					return rc.ReleaseInflightBalance(ctx, user.ID, requestID)
+				})
 				return nil, ErrBillingServiceUnavailable.WithCause(err)
 			}
 		}
