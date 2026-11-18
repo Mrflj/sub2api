@@ -963,6 +963,10 @@ type BillingConfig struct {
 // 估算失败或 Redis 不可用时 fail-open，退回旧的仅余额 > 阈值检查。
 type InflightReservationConfig struct {
 	Enabled bool `mapstructure:"enabled"`
+	// WaitTimeoutSeconds bounds gateway admission waits for temporary reservation contention; 0 disables waiting.
+	WaitTimeoutSeconds int `mapstructure:"wait_timeout_seconds"`
+	// WaitMaxWaiting limits reservation waiters per user in each process; 0 disables waiting.
+	WaitMaxWaiting int `mapstructure:"wait_max_waiting"`
 	// TTLSeconds 单条预留的最长存活时间；进程崩溃等泄漏的预留到期自动失效。
 	TTLSeconds int `mapstructure:"ttl_seconds"`
 	// DefaultMaxTokens 请求未携带 max_tokens 时用于估算的输出 token 数。
@@ -2461,6 +2465,8 @@ func setDefaults() {
 	viper.SetDefault("billing.user_platform_quota_cache_ttl_seconds", 86400)
 	viper.SetDefault("billing.user_platform_quota_sentinel_ttl_seconds", 3600)
 	viper.SetDefault("billing.inflight_reservation.enabled", true)
+	viper.SetDefault("billing.inflight_reservation.wait_timeout_seconds", 30)
+	viper.SetDefault("billing.inflight_reservation.wait_max_waiting", 8)
 	viper.SetDefault("billing.inflight_reservation.ttl_seconds", 900)
 	viper.SetDefault("billing.inflight_reservation.default_max_tokens", 8192)
 	viper.SetDefault("billing.inflight_reservation.max_output_tokens", 128000)
@@ -3513,8 +3519,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Billing.InflightReservation.TTLSeconds < 0 || c.Billing.InflightReservation.DefaultMaxTokens < 0 ||
 		c.Billing.InflightReservation.MaxOutputTokens < 0 || c.Billing.InflightReservation.MaxInputTokens < 0 ||
-		c.Billing.InflightReservation.MaxReservationUSD < 0 {
+		c.Billing.InflightReservation.MaxReservationUSD < 0 || c.Billing.InflightReservation.WaitTimeoutSeconds < 0 ||
+		c.Billing.InflightReservation.WaitMaxWaiting < 0 {
 		return fmt.Errorf("billing.inflight_reservation values must be non-negative")
+	}
+	if c.Billing.InflightReservation.WaitTimeoutSeconds > 300 {
+		return fmt.Errorf("billing.inflight_reservation.wait_timeout_seconds must not exceed 300")
 	}
 	if c.Database.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be positive")

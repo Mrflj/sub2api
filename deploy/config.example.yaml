@@ -1319,14 +1319,22 @@ billing:
   # (input estimate + output price x max_tokens) and atomically require
   # cached_balance - in-flight reservations >= estimate. A rejection is checked
   # against the DB balance and retried atomically once before it is returned.
-  # Temporary reservation contention returns HTTP 429; exhausted balance returns 403.
+  # Temporary reservation contention waits within the configured limit before
+  # returning HTTP 429; exhausted balance returns 403.
   # The first in-flight request of a user is always admitted (same as before).
   # Fails open when the estimate cannot be computed or Redis is unavailable.
   # 余额模式在途预留：准入时估算单请求费用，要求 缓存余额 - 在途预留合计 >= 估算；
-  # 拒绝前回源数据库复核并原子重试一次；临时预留占用返回 429，真实余额不足返回 403。
+  # 拒绝前回源数据库复核；临时预留占用先有限等待，超时返回 429，真实余额不足返回 403。
   # 用户无在途请求时始终放行（与旧行为一致）；估算失败/Redis 不可用时 fail-open。
   inflight_reservation:
     enabled: true
+    # Wait only on temporary contention; 0 disables waiting. Maximum 300 seconds.
+    # 临时预留占用的最长等待秒数；0 禁用等待，最大 300 秒。正常请求不等待。
+    wait_timeout_seconds: 30
+    # Per-user waiting limit in each process; 0 disables waiting. There is also
+    # a process-wide limit of 256 waiters to bound resource use.
+    # 每个用户在单进程内的等待人数上限；0 禁用等待，单进程总上限为 256。
+    wait_max_waiting: 8
     # Reservation TTL. Renewed every ttl/3 while the request is running; after the
     # handler returns it is held (not renewed) until the async billing task has
     # deducted the cached balance, so a stuck billing task frees it after at most one TTL.

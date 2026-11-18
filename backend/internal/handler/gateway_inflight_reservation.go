@@ -56,6 +56,7 @@ func inflightNoop() {}
 // （停止续期并归还 handler 引用；没有提交计费任务时即刻释放）。
 // 开关关闭、订阅模式、Redis 故障时返回 no-op（fail-open）；无法定价时默认 fail-open，
 // 配置 fail_closed_on_unpriced=true 时返回计费服务不可用，不冒充用户余额不足。
+// Temporary contention uses a bounded admission wait without writing response data.
 func reserveInflightBalance(
 	c *gin.Context,
 	billing *service.BillingCacheService,
@@ -107,7 +108,7 @@ func reserveInflightBalanceCtx(
 	if estimate <= 0 {
 		return ctx, inflightNoop, nil
 	}
-	res, err := billing.ReserveInflight(ctx, apiKey.User, apiKey.Group, subscription, estimate)
+	res, err := billing.ReserveInflightWithWait(ctx, apiKey, subscription, estimate, service.QuotaPlatform(ctx, apiKey))
 	if err != nil {
 		return ctx, inflightNoop, err
 	}

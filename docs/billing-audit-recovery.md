@@ -100,7 +100,18 @@ unregistered request ID atomically using the fresh balance. Successful fast path
 add no DB read; concurrent rejection rechecks are coalesced per user.
 
 Exhausted balance or a configured minimum-balance floor still returns HTTP 403.
-Temporary reservation contention now returns HTTP 429 with `Retry-After: 5`,
+Temporary reservation contention first waits up to
+`billing.inflight_reservation.wait_timeout_seconds` (default 30 seconds), with
+`wait_max_waiting` (default 8) waiters per user per process and at most 256 waiters
+across that process. Setting either option to 0 disables waiting. Normal admission
+does not wait. Polling reuses atomic reservation admission, never forwards an
+upstream request, and does not increment RPM or debit the balance. A completed
+request that spent the last balance cannot bypass eligibility by becoming the
+first remaining reservation. Monetary key/platform limits are checked again
+before a waiting request proceeds, and cancellation releases wait capacity and
+any newly acquired reservation. Async billing retains its existing ownership.
+
+Unresolved contention or a full wait queue returns HTTP 429 with `Retry-After: 5`,
 instead of telling a user with remaining money to recharge. Database verification
 failure and fail-closed unpriced models return billing-service HTTP 503. Request
 error metadata records the stage, user ID, observed/verified balance, reserved
