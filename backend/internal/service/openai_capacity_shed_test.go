@@ -26,6 +26,10 @@ type capacityShedAccountRepoStub struct {
 	tempUnschedCalls int
 }
 
+func (r *capacityShedAccountRepoStub) GetByID(_ context.Context, id int64) (*Account, error) {
+	return &Account{ID: id}, nil
+}
+
 func (r *capacityShedAccountRepoStub) SetTempUnschedulable(_ context.Context, _ int64, _ time.Time, _ string) error {
 	r.tempUnschedCalls++
 	return nil

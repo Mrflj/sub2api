@@ -2,7 +2,7 @@
 
 本页说明 #727 已合入源码的归属保护，关联 [Issue #715](https://github.com/ranxi2001/sub2api/issues/715)。源码合并、Release 和实例部署分别核实；不能只凭版本号认为当前实例已启用这些路径，也不能把离线回归当作真实供应商的格式兼容证明。
 
-下文描述默认严格策略。管理员可通过默认 `false` 的 `gateway.disable_encrypted_agent_owner_binding` 显式允许完整已交付历史尝试其他合格账号；配置方法、交付安全、统一节点切换与回 strict 的混合 owner 限制见[加密 agent 历史账号策略](encrypted-agent-owner-policy.md)。开关不保证上游密文兼容，也不允许重放不确定交付的任务。
+当前 `gateway.disable_encrypted_agent_owner_binding` 默认 `true`，完整已交付历史可尝试其他合格账号。下文的严格归属检查适用于显式设为 `false` 的部署；配置方法、交付安全、统一节点切换与回 strict 的混合 owner 限制见[加密 agent 历史账号策略](encrypted-agent-owner-policy.md)。开关不保证上游密文兼容，也不允许重放不确定交付的任务。
 
 ## 保留任务后再判断故障
 

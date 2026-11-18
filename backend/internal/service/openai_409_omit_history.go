@@ -627,15 +627,15 @@ func prepareOpenAI409OAuthReplay(ctx context.Context, c *gin.Context, body map[s
 	return nil
 }
 
-// A rebuilt request is a new native Responses conversation. An API-key
-// account's ordinary passthrough preference must not route this prepared
-// request around the native input and delivery checks. Subsequent single-owner
-// turns must keep the learned native route too; exact route/credentials/wire
-// validation still runs before sending.
+// Rebuilt requests and preserved complete history require the native Responses
+// input and delivery checks, even when an API-key account prefers passthrough.
+// Subsequent single-owner turns must keep the learned native route too;
+// exact route/credentials/wire validation still runs before sending.
 func openAI409UsesNativeAPIKey(ctx context.Context, account *Account) bool {
 	r := openAIAgentRecoveryFromContext(ctx)
 	return r != nil && account != nil && account.IsOpenAIApiKey() &&
-		(r.omittedHistory || (r.ownerBindingRequired() && r.owner.accountID == account.ID))
+		(r.omittedHistory || (r.disableOwnerBinding && len(r.items) > 0) ||
+			(r.ownerBindingRequired() && r.owner.accountID == account.ID))
 }
 
 func openAIRecoveryWireRefusal(ctx context.Context, stage string, details ...zap.Field) error {
@@ -723,7 +723,7 @@ func (s *OpenAIGatewayService) prepareOpenAI409HTTPProjection(ctx context.Contex
 // The same boundary remains enforced by the dispatch guard after revalidation.
 func (s *OpenAIGatewayService) openAI409AccountRouteSupported(ctx context.Context, account *Account, model string) bool {
 	r := openAIAgentRecoveryFromContext(ctx)
-	if r == nil || !r.omittedHistory {
+	if r == nil || (!r.omittedHistory && !(r.disableOwnerBinding && len(r.items) > 0)) {
 		return true
 	}
 	return account != nil && account.IsOpenAI() && !account.HasManagedOpenAIConnections() && account.AuthConnectionID == "" &&

@@ -794,6 +794,16 @@ func (s *GatewayService) TempUnscheduleRetryableError(ctx context.Context, accou
 	if failoverErr.RequestScopedTransient {
 		return
 	}
+	if s == nil || s.accountRepo == nil ||
+		(failoverErr.StatusCode != http.StatusBadRequest && failoverErr.StatusCode != http.StatusBadGateway) {
+		return
+	}
+	// Retry exhaustion is request-local. It must not park a pool for subsequent
+	// requests, even when a provider-specific failure omitted its scope marker.
+	account, err := s.accountRepo.GetByID(ctx, accountID)
+	if err != nil || account == nil || account.IsPoolMode() {
+		return
+	}
 	// 根据状态码选择封禁策略
 	switch failoverErr.StatusCode {
 	case http.StatusBadRequest:

@@ -2077,7 +2077,7 @@ func shouldCoolOpenAIImagesToolForError(upstreamErr *OpenAIImagesUpstreamError) 
 }
 
 func (s *OpenAIGatewayService) coolOpenAIImagesOAuthTool(ctx context.Context, account *Account) {
-	if s == nil || s.accountRepo == nil || account == nil || account.Platform != PlatformOpenAI {
+	if s == nil || s.accountRepo == nil || account == nil || account.Platform != PlatformOpenAI || account.IsPoolMode() {
 		return
 	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)

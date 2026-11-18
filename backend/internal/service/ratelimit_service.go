@@ -196,6 +196,9 @@ func (s *RateLimitService) ApplyAccountSchedulingThreshold(ctx context.Context, 
 	if s == nil || s.settingService == nil || s.accountRepo == nil || account == nil || account.ID <= 0 {
 		return false
 	}
+	if account.IsPoolMode() {
+		return false
+	}
 	if !account.IsActive() || !account.Schedulable {
 		return false
 	}
@@ -330,6 +333,11 @@ const (
 // CheckErrorPolicy 检查自定义错误码和临时不可调度规则。
 // 自定义错误码开启时覆盖后续所有逻辑（包括临时不可调度）。
 func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Account, statusCode int, responseBody []byte, requestedModel ...string) ErrorPolicyResult {
+	// Pool members are managed by the upstream. Error-code and temporary rules
+	// must not turn one failed attempt into a local account/model suspension.
+	if account != nil && account.IsPoolMode() {
+		return ErrorPolicySkipped
+	}
 	// An edge refusal must not reach account-specific rules, linked-account
 	// mutation or quota handlers, even when administrators configured a broad 403.
 	if statusCode == http.StatusForbidden && isCloudflareBotBlockResponse(responseBody) {
@@ -348,17 +356,6 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 			return ErrorPolicyMatched
 		}
 		slog.Info("account_error_code_skipped", "account_id", account.ID, "status_code", statusCode)
-		return ErrorPolicySkipped
-	}
-	if account.IsPoolMode() {
-		// 池模式只跳过默认账号状态处理；管理员显式配置的临时不可调度规则仍应生效。
-		// 401 只在非凭据级且命中显式模型级规则时由规则处理，其余保留现有认证错误语义。
-		if stop, triggered := s.consumeTempUnschedAttempt(ctx, account, statusCode, responseBody); stop {
-			if triggered {
-				return ErrorPolicyTempUnscheduled
-			}
-			return ErrorPolicySkipped
-		}
 		return ErrorPolicySkipped
 	}
 	// The global overload cooldown is the default for ordinary accounts. Explicit
@@ -388,6 +385,10 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 // handleUpstreamErrorAfterStreakReset keeps account policy handling shared with
 // the OpenAI gateway, which resets the streak before its early-return policies.
 func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+	if account != nil && account.IsPoolMode() {
+		s.observeAccountOps(ctx, account, statusCode, headers, responseBody)
+		return false
+	}
 	ctx, disabledOn429 := s.maybeDisableOpenAISchedulingOn429(ctx, account, statusCode, headers)
 	if disabledOn429 {
 		defer func() { shouldDisable = true }()
@@ -428,20 +429,6 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 	// 同请求内与 fastpath 调用点的重复触发由方法内去重吸收。
 	s.maybeHandleOpenAITeamLinkedError(ctx, account, statusCode, responseBody)
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
-
-	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
-	// 401 只在非凭据级且命中显式模型级规则时由规则处理，其余保留池模式现有的认证处理。
-	if account.IsPoolMode() && !customErrorCodesEnabled {
-		if stop, triggered := s.consumeTempUnschedAttempt(ctx, account, statusCode, responseBody); stop {
-			if triggered {
-				return true
-			}
-			slog.Info("pool_mode_temp_unsched_pending", "account_id", account.ID, "status_code", statusCode)
-			return false
-		}
-		slog.Info("pool_mode_error_skipped", "account_id", account.ID, "status_code", statusCode)
-		return false
-	}
 
 	// apikey 类型账号：检查自定义错误码配置
 	// 如果启用且错误码不在列表中，则不处理（不停止调度、不标记限流/过载）
@@ -1695,6 +1682,9 @@ func (s *RateLimitService) persistAnthropicExhaustedWindowLimit(ctx context.Cont
 	if s == nil || s.accountRepo == nil || account == nil {
 		return false
 	}
+	if account.IsPoolMode() {
+		return false
+	}
 	now := time.Now()
 	limit := selectAnthropicExhaustedWindow(headers, now)
 	if limit == nil {
@@ -1737,6 +1727,9 @@ const (
 // limited would unnecessarily stop Sonnet, Opus, and Haiku scheduling.
 func (s *RateLimitService) persistAnthropicFableCreditsRequired(ctx context.Context, account *Account, headers http.Header, responseBody []byte, requestedModel string) bool {
 	if s == nil || s.accountRepo == nil || account == nil {
+		return false
+	}
+	if account.IsPoolMode() {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responseBody, "error.details.error_code").String()), "credits_required") {
@@ -1821,6 +1814,9 @@ func parseAnthropicAggregateReset(headers http.Header, now time.Time) (time.Time
 // would mark the whole account as rate limited.
 func (s *RateLimitService) persistAnthropicFableWindowLimit(ctx context.Context, account *Account, headers http.Header) bool {
 	if s == nil || s.accountRepo == nil || account == nil {
+		return false
+	}
+	if account.IsPoolMode() {
 		return false
 	}
 	now := time.Now()
@@ -2520,7 +2516,7 @@ func (s *RateLimitService) HandleTempUnschedulable(ctx context.Context, account 
 	if account == nil {
 		return false
 	}
-	if account.IsPoolMode() && !account.IsCustomErrorCodesEnabled() {
+	if account.IsPoolMode() {
 		return false
 	}
 	if !account.ShouldHandleErrorCode(statusCode) {
@@ -2539,6 +2535,9 @@ func (s *RateLimitService) HandleOpenAIImageRateLimit(ctx context.Context, accou
 		return false
 	}
 	if account.Platform != PlatformOpenAI {
+		return false
+	}
+	if account.IsPoolMode() {
 		return false
 	}
 	if !account.ShouldHandleErrorCode(statusCode) {
@@ -2600,6 +2599,9 @@ func (s *RateLimitService) HandleOpenAIImageCapabilityLoss(ctx context.Context, 
 		return false
 	}
 	if account.Platform != PlatformOpenAI {
+		return false
+	}
+	if account.IsPoolMode() {
 		return false
 	}
 	if !account.ShouldHandleErrorCode(statusCode) {
@@ -2743,11 +2745,9 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	if s == nil || account == nil || s.accountRepo == nil {
 		return false
 	}
-	// A pool relay owns its member/model availability. Its observation must not
-	// become a local 30-minute negative cache by bypassing the generic pool
-	// policy through the OpenAI fastpath. Explicit error-code policy remains
-	// authoritative; administrator temporary rules run at the caller below.
-	if account.IsPoolMode() && !account.IsCustomErrorCodesEnabled() {
+	// A pool relay owns its member/model availability, including when an
+	// account also has custom error-code handling configured.
+	if account.IsPoolMode() {
 		return false
 	}
 	if !account.ShouldHandleErrorCode(statusCode) {
@@ -3068,6 +3068,9 @@ func (s *RateLimitService) evaluateTempUnschedulable(ctx context.Context, accoun
 	if account == nil || s == nil {
 		return tempUnschedNoMatch
 	}
+	if account.IsPoolMode() {
+		return tempUnschedNoMatch
+	}
 	if !account.IsTempUnschedulableEnabled() {
 		return tempUnschedNoMatch
 	}
@@ -3273,7 +3276,7 @@ func truncateTempUnschedMessage(body []byte, maxBytes int) string {
 // 根据系统设置决定是否标记账户为临时不可调度或错误状态
 // 返回是否应该停止该账号的调度
 func (s *RateLimitService) HandleStreamTimeout(ctx context.Context, account *Account, model string) bool {
-	if account == nil {
+	if account == nil || account.IsPoolMode() {
 		return false
 	}
 

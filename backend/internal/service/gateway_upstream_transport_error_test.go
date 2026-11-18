@@ -215,21 +215,19 @@ func TestHandleUpstreamTransportError_PoolModeOptInKeepsAccountSchedulable(t *te
 	}
 }
 
-// TestHandleUpstreamTransportError_PoolModeNotOptedInKeepsDefault pins that
-// the opt-in is listing 503 on a direct account: a pool-mode account on the
-// default retry codes, with a list that leaves 503 out, or behind a proxy
-// keeps the existing behavior — a durable transport failure still temporarily
-// unschedules it.
-func TestHandleUpstreamTransportError_PoolModeNotOptedInKeepsDefault(t *testing.T) {
+// Cooldown protection is independent of the configured retry codes or proxy.
+func TestHandleUpstreamTransportError_PoolModeKeepsConfiguredRetriesWithoutCooldown(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		codes   []any
 		proxied bool
+		status  int
+		retry   bool
 	}{
-		{name: "default codes", codes: nil},
-		{name: "only 502 listed", codes: []any{float64(502)}},
-		{name: "explicitly empty", codes: []any{}},
-		{name: "503 listed but proxied", codes: []any{float64(503)}, proxied: true},
+		{name: "default codes", codes: nil, status: 502},
+		{name: "only 502 listed", codes: []any{float64(502)}, status: 502, retry: true},
+		{name: "explicitly empty", codes: []any{}, status: 502},
+		{name: "503 listed but proxied", codes: []any{float64(503)}, proxied: true, status: 503, retry: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &transportTempUnschedRepoStub{}
@@ -248,11 +246,11 @@ func TestHandleUpstreamTransportError_PoolModeNotOptedInKeepsDefault(t *testing.
 			if !errors.As(err, &failoverErr) {
 				t.Fatalf("expected *UpstreamFailoverError, got %T: %v", err, err)
 			}
-			if failoverErr.StatusCode != http.StatusBadGateway {
-				t.Fatalf("StatusCode = %d, want 502 (unchanged)", failoverErr.StatusCode)
+			if failoverErr.StatusCode != tc.status || failoverErr.RetryableOnSameAccount != tc.retry {
+				t.Fatalf("StatusCode = %d, retry = %t, want %d/%t", failoverErr.StatusCode, failoverErr.RetryableOnSameAccount, tc.status, tc.retry)
 			}
-			if repo.calls != 1 {
-				t.Fatalf("SetTempUnschedulable called %d times, want 1 (unchanged)", repo.calls)
+			if repo.calls != 0 {
+				t.Fatalf("SetTempUnschedulable called %d times for a pool, want 0", repo.calls)
 			}
 		})
 	}

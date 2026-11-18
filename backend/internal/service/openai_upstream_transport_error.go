@@ -178,11 +178,11 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	}
 
 	// Use the mapped gateway status when no upstream HTTP response exists.
-	// Durable proxy/network faults keep their immediate eviction policy.
+	// Only non-pool accounts retain the durable-fault cooldown policy.
 	return &UpstreamFailoverError{
 		StatusCode:             http.StatusBadGateway,
 		ResponseBody:           openAITransportFailoverBody,
-		RetryableOnSameAccount: !persistent && account.IsPoolMode() && account.IsPoolModeRetryableStatus(http.StatusBadGateway),
+		RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(http.StatusBadGateway),
 	}
 }
 
@@ -198,7 +198,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 //   - "openai.account_temp_unscheduled_transport_failed" — DB write attempted
 //     but returned an error.
 func (s *OpenAIGatewayService) tempUnscheduleOpenAITransportError(ctx context.Context, account *Account, safeErr string) {
-	if s == nil || account == nil {
+	if s == nil || account == nil || account.IsPoolMode() {
 		return
 	}
 	until := time.Now().Add(openAITransportErrorTempUnschedDuration)

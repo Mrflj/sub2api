@@ -32,9 +32,7 @@ var gatewayTransportFailoverBody = []byte(`{"type":"error","error":{"type":"upst
 //     A client disconnect is not recorded (see isClientCanceledTransportError);
 //  2. for durable faults (expired/rejected proxy creds, dead proxy,
 //     DNS/routing) temporarily unschedules the account and logs a stable warn
-//     event that alert rules can key on — except for direct pool-mode
-//     accounts that opted in by listing 503 in pool_mode_retry_status_codes,
-//     see poolModeTreatsTransportErrorAs503;
+//     event that alert rules can key on, except for pool-mode accounts;
 //  3. returns an error that is *UpstreamFailoverError (so the handler fails
 //     over to a healthy account) for all non-canceled errors, or the original
 //     error for context.Canceled (client gone — no failover, no eviction).
@@ -74,8 +72,9 @@ func (s *GatewayService) handleUpstreamTransportError(ctx context.Context, c *gi
 	}
 
 	return &UpstreamFailoverError{
-		StatusCode:   http.StatusBadGateway,
-		ResponseBody: gatewayTransportFailoverBody,
+		StatusCode:             http.StatusBadGateway,
+		ResponseBody:           gatewayTransportFailoverBody,
+		RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(http.StatusBadGateway),
 	}
 }
 
@@ -87,18 +86,10 @@ func (s *GatewayService) handleUpstreamTransportError(ctx context.Context, c *gi
 // for gatewayTransportErrorTempUnschedDuration turns a restart of a few
 // seconds into a ten-minute outage for every group whose only account it is.
 //
-// It is opt-in through the existing pool_mode_retry_status_codes setting:
-// listing 503 says "this upstream recovers from being unavailable", so a
-// transport failure is handled like an upstream 503. The default list (401,
-// 403, 429) leaves 503 out, so accounts that did not opt in keep the
-// temp-unschedule behavior.
-//
-// Accounts with a proxy keep it too: there a refused dial or an auth failure
-// may come from the proxy itself, which is exactly the durable fault the
-// temp-unschedule exists for.
+// Listing 503 retains the existing unavailable-status retry policy. Other
+// pools use the gateway's 502 policy; neither path suspends the pool.
 func poolModeTreatsTransportErrorAs503(account *Account) bool {
 	return account.IsPoolMode() &&
-		account.ProxyID == nil &&
 		account.IsPoolModeRetryableStatus(http.StatusServiceUnavailable)
 }
 
@@ -147,7 +138,7 @@ func (s *GatewayService) tempUnscheduleTransportError(ctx context.Context, accou
 // shared by every forward path whose scheduler reads the persisted
 // temp-unschedulable state (Anthropic/Bedrock and Gemini).
 func tempUnscheduleAccountForTransportError(ctx context.Context, repo AccountRepository, account *Account, safeErr string) {
-	if account == nil || repo == nil {
+	if account == nil || repo == nil || account.IsPoolMode() {
 		return
 	}
 	until := time.Now().Add(gatewayTransportErrorTempUnschedDuration)

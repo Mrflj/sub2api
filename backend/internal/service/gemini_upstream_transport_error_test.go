@@ -75,21 +75,18 @@ func TestGeminiForwardNative_TransientTransportErrorFailsOverWithoutRetry(t *tes
 	require.Zero(t, events[0].UpstreamStatusCode)
 }
 
-func TestGeminiForwardNative_PersistentTransportErrorEvictsAccount(t *testing.T) {
+func TestGeminiForwardNative_PersistentTransportErrorKeepsPoolAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc, httpStub, repo := newGeminiTransportErrorService(errors.New(`dial tcp 1.2.3.4:443: connect: connection refused`))
 	c, _ := newGeminiNativeTestContext(t)
 	account := geminiPoolModeAPIKeyAccount()
 
-	before := time.Now()
 	_, err := svc.ForwardNative(context.Background(), c, account,
 		"gemini-2.5-flash", "streamGenerateContent", true, []byte(geminiTransportTestNativeBody))
 
 	requireGeminiTransportFailover(t, err)
 	require.Equal(t, 1, httpStub.calls)
-	require.Equal(t, 1, repo.calls, "持久性故障应临时摘号")
-	require.Equal(t, account.ID, repo.lastID)
-	require.WithinDuration(t, before.Add(gatewayTransportErrorTempUnschedDuration), repo.lastUntil, 5*time.Second)
+	require.Zero(t, repo.calls, "池模式不能因传输故障临时摘号")
 	require.False(t, c.Writer.Written())
 }
 

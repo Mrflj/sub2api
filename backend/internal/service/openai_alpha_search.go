@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -219,6 +220,9 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 
 	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
+		if options != nil && options.useResponsesWebSearch && shouldClassifyOpenAIUpstreamStreamReadError(err, ctx, c.Request.Context()) {
+			return nil, newMessagesWebSearchResponseError(c, account, resp, "web_search_response_read_error", "Upstream web search response was interrupted")
+		}
 		return nil, fmt.Errorf("read alpha search responses fallback response: %w", err)
 	}
 
@@ -254,10 +258,22 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	}
 	alphaRespBody, err := openAIAlphaSearchResponseFromResponsesSSE(respBody)
 	if err != nil {
+		if options != nil && options.useResponsesWebSearch {
+			var terminalErr *openAIAlphaSearchTerminalError
+			if errors.As(err, &terminalErr) {
+				// Keep the semantic status and diagnostic message from a 200/SSE failure.
+				message := firstNonEmpty(gjson.GetBytes(terminalErr.payload, "response.error.message").String(), extractUpstreamErrorMessage(terminalErr.payload))
+				if failover := s.nonStreamingTerminalFailureFailover(c, resp, account, true, terminalErr.eventType, terminalErr.payload, message, upstreamModel); failover != nil {
+					return nil, failover
+				}
+			} else {
+				return nil, newMessagesWebSearchResponseError(c, account, resp, "web_search_response_invalid", "Upstream web search response was invalid or incomplete")
+			}
+		}
 		return nil, err
 	}
 	if options != nil && options.useResponsesWebSearch && !hasCompletedMessagesWebSearchCall(respBody) {
-		return nil, fmt.Errorf("messages web search: upstream completed without executing web search")
+		return nil, newMessagesWebSearchNotExecutedError(c, account, resp)
 	}
 	if err := s.writeAlphaSearchResponse(c, options, http.StatusOK, nil, alphaRespBody); err != nil {
 		return nil, err
@@ -628,6 +644,15 @@ func openAIAlphaSearchResponseFromResponsesSSE(body []byte) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
+type openAIAlphaSearchTerminalError struct {
+	eventType string
+	payload   []byte
+}
+
+func (e *openAIAlphaSearchTerminalError) Error() string {
+	return fmt.Sprintf("alpha search responses stream ended with %s", e.eventType)
+}
+
 func parseOpenAIResponsesSSEForAlphaSearch(body []byte) (string, []any, error) {
 	text := strings.ReplaceAll(string(body), "\r\n", "\n")
 	var output strings.Builder
@@ -646,7 +671,7 @@ func parseOpenAIResponsesSSEForAlphaSearch(body []byte) (string, []any, error) {
 		}
 		switch event["type"] {
 		case "error", "response.failed", "response.incomplete":
-			return "", nil, fmt.Errorf("alpha search responses stream ended with %s", event["type"])
+			return "", nil, &openAIAlphaSearchTerminalError{eventType: event["type"].(string), payload: []byte(data)}
 		case "response.completed":
 			response, ok := event["response"].(map[string]any)
 			if !ok || response == nil {

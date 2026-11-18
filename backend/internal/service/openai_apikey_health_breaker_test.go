@@ -101,7 +101,7 @@ func TestOpenAIAPIKeyHealthBreakerDefaultDisabled(t *testing.T) {
 	require.Zero(t, cache.recordCalls)
 }
 
-func TestOpenAIAPIKeyHealthBreakerTripsPersistedAndRuntimeState(t *testing.T) {
+func TestOpenAIAPIKeyHealthBreakerDoesNotSuspendPool(t *testing.T) {
 	encoded, err := json.Marshal(OpenAIAPIKeyHealthBreakerSettings{Enabled: true, WindowMinutes: 1, FailureThreshold: 3, CooldownMinutes: 5})
 	require.NoError(t, err)
 	settings := NewSettingService(&openAIAPIKeyHealthSettingRepo{value: string(encoded)}, &config.Config{})
@@ -114,13 +114,12 @@ func TestOpenAIAPIKeyHealthBreakerTripsPersistedAndRuntimeState(t *testing.T) {
 	svc.SetAccountRuntimeBlocker(blocker)
 	account := openAIHealthPoolAccount()
 
-	require.True(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, ResponseBody: []byte(`{"error":"upstream"}`)}))
-	require.Equal(t, 1, cache.recordCalls)
-	require.Equal(t, 1, cache.setCalls)
-	require.Equal(t, 1, repo.setCalls)
-	require.Equal(t, 1, blocker.calls)
-	require.NotNil(t, account.TempUnschedulableUntil)
-	require.Contains(t, repo.reason, openAIAPIKeyHealthBreakerReason)
+	require.False(t, svc.ObserveOpenAIAPIKeyHealthFailure(context.Background(), account, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, ResponseBody: []byte(`{"error":"upstream"}`)}))
+	require.Zero(t, cache.recordCalls)
+	require.Zero(t, cache.setCalls)
+	require.Zero(t, repo.setCalls)
+	require.Zero(t, blocker.calls)
+	require.Nil(t, account.TempUnschedulableUntil)
 }
 
 func TestOpenAIAPIKeyHealthSuccessDoesNotTouchSettingsOrCache(t *testing.T) {

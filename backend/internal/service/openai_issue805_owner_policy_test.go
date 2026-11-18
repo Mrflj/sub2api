@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -242,4 +243,40 @@ func TestIssue805WSRefusedCurrentPointerCannotReplayWarmup(t *testing.T) {
 	err := issue715WSBegin(t, manager, account, `{"model":"gpt-6-astra","previous_response_id":"resp_unknown","input":[]}`, "ctx_pool")
 	require.Error(t, err)
 	require.False(t, OpenAIWSAgentRecoveryCanRetry(manager.ctx), "a refused current pointer cannot be replaced by replaying the initial warmup")
+}
+
+func TestIssue805FullHistoryRouteAdmissionMatchesDispatch(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		for _, route := range []string{"native", "apikey_passthrough", "chat_completions", "oauth_passthrough", "managed"} {
+			t.Run(fmt.Sprintf("protected=%t/%s", protected, route), func(t *testing.T) {
+				svc := &OpenAIGatewayService{cfg: &config.Config{}}
+				r := &openAIAgentRecoveryRequest{disableOwnerBinding: true, model: "gpt-6-astra"}
+				if protected {
+					r.items = [][32]byte{{1}}
+				}
+				ctx := context.WithValue(context.Background(), openAIAgentRecoveryContextKey{}, r)
+				account := &Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: map[string]any{}}
+				switch route {
+				case "apikey_passthrough":
+					account.Extra["openai_passthrough"] = true
+				case "chat_completions":
+					account.Extra["openai_responses_mode"] = "force_chat_completions"
+				case "oauth_passthrough":
+					account.Type = AccountTypeOAuth
+					account.Extra["openai_passthrough"] = true
+				case "managed":
+					account.AuthConnectionID = "fixture-managed-connection"
+				}
+				want := !protected || route == "native" || route == "apikey_passthrough"
+				require.Equal(t, want, svc.openAI409AccountRouteSupported(ctx, account, r.model), "filter unsupported routes before selecting an account")
+				c, _ := newTurnStateTestContext(t, 715, "fixture-session")
+				err := svc.checkOpenAIAgentRecoveryDispatch(ctx, c, account, []byte(issue715OpaqueBody))
+				if want {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
+			})
+		}
+	}
 }

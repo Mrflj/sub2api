@@ -13,10 +13,13 @@ func TestIssue805OwnerPolicyConfiguration(t *testing.T) {
 		name, yaml, env string
 		want            bool
 	}{
-		{"default", "", "", false},
+		{"default", "", "", true},
+		{"unrelated_yaml", "server:\n  port: 8080\n", "", true},
 		{"yaml_false", "gateway:\n  disable_encrypted_agent_owner_binding: false\n", "", false},
 		{"yaml_true", "gateway:\n  disable_encrypted_agent_owner_binding: true\n", "", true},
 		{"env_true", "", "true", true},
+		{"env_false", "", "false", false},
+		{"env_true_over_yaml", "gateway:\n  disable_encrypted_agent_owner_binding: false\n", "true", true},
 		{"env_false_over_yaml", "gateway:\n  disable_encrypted_agent_owner_binding: true\n", "false", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
