@@ -56,6 +56,7 @@ type openAIAgentRecoveryRequest struct {
 	inputDigest          [32]byte
 	replaySource         []byte // immutable pre-builder source, never a retry's mutable wire
 	nativeInputDigest    [32]byte
+	nativeCompatInputs   [][32]byte
 	nativeReplayPrepared bool
 	nativeAccountID      int64
 	replayControlsDigest [32]byte
@@ -522,7 +523,7 @@ func (s *OpenAIGatewayService) prepareOpenAIAgentRecoveryAttempt(ctx context.Con
 		}
 		expectedInput, expectedControls = request.oauthInputDigest, request.oauthControlsDigest
 	}
-	if request.preservesHistory() && openAIAgentRecoveryInputDigest(body) != expectedInput {
+	if request.preservesHistory() && !request.matchesReplayInput(account, body, expectedInput) {
 		if request.omittedHistory {
 			logger.FromContext(ctx).Warn("openai.encrypted_history_409_refused", zap.String("stage", "input_integrity"))
 		}
@@ -763,7 +764,7 @@ func (s *OpenAIGatewayService) checkOpenAIAgentRecoveryCompaction(ctx context.Co
 	if err != nil || !utf8.Valid(body) || !openAIEncryptedJSONUnambiguous(body) {
 		return request.refusal("wire_changed", "native_compaction", "request_body_unreadable_or_ambiguous")
 	}
-	if request.preservesHistory() && openAIAgentRecoveryInputDigest(body) != request.inputDigest {
+	if request.preservesHistory() && !request.matchesReplayInput(account, body, request.inputDigest) {
 		return openAIAgentRecoveryError("wire_changed")
 	}
 	if request.previousResponseID != "" && gjson.GetBytes(body, "previous_response_id").String() != request.previousResponseID {

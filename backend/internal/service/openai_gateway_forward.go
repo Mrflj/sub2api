@@ -750,7 +750,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 		// Responses OAuth 与 Chat 兼容入口保持一致：纯文本 system 可以无损提升后删除，
 		// JSON object 模式仍需在 input 中保留 JSON 指令供上游兼容校验。
-		omitPromotedSystemMessages := !readableReplay && !strings.EqualFold(
+		omitPromotedSystemMessages := !readableReplay && !s.preserveOpenAIAgentHistory(body) && !strings.EqualFold(
 			strings.TrimSpace(gjson.GetBytes(body, "text.format.type").String()),
 			"json_object",
 		)
@@ -951,7 +951,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		markPatchSet("service_tier", OpenAIFastTierPriority)
 	}
 
-	if account.UsesOpenAICodexProtocol() {
+	if account.UsesOpenAICodexProtocol() && !s.preserveOpenAIAgentHistory(body) {
 		decoded, decodeErr := ensureReqBody()
 		if decodeErr != nil {
 			return nil, decodeErr
