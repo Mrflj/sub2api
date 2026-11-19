@@ -1624,7 +1624,7 @@ func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *
 			changed = changed || webSearchChanged
 		}
 	}
-	needsOrphanCleanup := account != nil && account.IsOpenAIOAuthLike() &&
+	needsOrphanCleanup := !opts.PreserveInput && account != nil && account.IsOpenAIOAuthLike() &&
 		gjson.GetBytes(normalized, "input").IsArray() && openAIResponsesMayNeedOrphanCleanup(normalized)
 	if needsOrphanCleanup || openAIResponsesInputMayNeedTruncation(normalized) {
 		var reqBody map[string]any

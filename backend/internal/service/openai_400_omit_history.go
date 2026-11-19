@@ -70,7 +70,7 @@ func (s *OpenAIGatewayService) prepareOpenAI400HistoryRecovery(ctx context.Conte
 	if r.omittedHistory && r.oauthReplayPrepared {
 		expectedInput = r.oauthInputDigest
 	}
-	if r.preservesHistory() && openAIAgentRecoveryInputDigest(body) != expectedInput {
+	if r.preservesHistory() && !r.matchesReplayInput(account, body, expectedInput) {
 		return refuse("history_integrity")
 	}
 	if s.checkOpenAIAgentRecoveryRecords(ctx, r, r.delivery.binding) != nil {

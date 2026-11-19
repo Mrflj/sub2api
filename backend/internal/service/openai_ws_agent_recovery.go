@@ -166,6 +166,12 @@ func (r *openAIWSAgentRecovery) prepareReadable(account *Account, source []byte)
 			ctx := r.service.WithOpenAIAgentMessageRecovery(r.ctx, r.c, clean, r.session, model)
 			r.protected = openAIAgentRecoveryFromContext(ctx)
 			r.protected.nativeAccountID = account.ID
+			r.protected.nativeReplayPrepared = true
+			r.protected.nativeInputDigest = r.protected.inputDigest
+			r.protected.nativeCompatInputs, err = r.service.openAIAgentReplayCompatibleInputs(account, clean, "ws", r.protected.nativeCompaction)
+			if err != nil {
+				return nil, err
+			}
 			r.protectedSource = openAIAgentRecoveryInputDigest(source)
 			r.protectedControls = openAI409ControlsDigest(source)
 		}
@@ -298,6 +304,10 @@ func (r *openAIWSAgentRecovery) begin(account *Account, source, payload []byte, 
 		// the immutable pre-builder snapshot, never the final source/payload.
 		fresh := openAIAgentRecoveryFromContext(ctx)
 		fresh.inputDigest = r.protected.inputDigest
+		fresh.nativeInputDigest = r.protected.nativeInputDigest
+		fresh.nativeReplayPrepared = r.protected.nativeReplayPrepared
+		fresh.nativeAccountID = r.protected.nativeAccountID
+		fresh.nativeCompatInputs = r.protected.nativeCompatInputs
 		if fresh.known == nil {
 			fresh.known = make(map[[32]byte]bool)
 		}

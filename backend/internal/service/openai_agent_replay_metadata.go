@@ -28,8 +28,8 @@ func (s *OpenAIGatewayService) PrepareOpenAIAgentReplayBody(body []byte) ([]byte
 }
 
 // Derive the selected account's native input from the immutable source before
-// other builders run. OAuth stateless metadata and administrator-enabled manual
-// timezone normalization are the only permitted projections here.
+// other builders run. Freeze the account and transport compatibility forms from
+// this source, never from a builder's final, potentially damaged payload.
 func (s *OpenAIGatewayService) prepareOpenAIAgentOAuthReplay(ctx context.Context, account *Account, body []byte) (context.Context, []byte, error) {
 	r := openAIAgentRecoveryFromContext(ctx)
 	if r == nil || !r.disableOwnerBinding || !r.preservesHistory() || r.omittedHistory || r.omitted400History || account == nil || !account.IsOpenAI() {
@@ -57,7 +57,87 @@ func (s *OpenAIGatewayService) prepareOpenAIAgentOAuthReplay(ctx context.Context
 	private.nativeInputDigest = openAIAgentRecoveryInputDigest(projected)
 	private.nativeReplayPrepared = true
 	private.nativeAccountID = account.ID
+	private.nativeCompatInputs, err = s.openAIAgentReplayCompatibleInputs(account, projected, "http", r.nativeCompaction)
+	if err != nil {
+		return ctx, nil, err
+	}
 	return context.WithValue(ctx, openAIAgentRecoveryContextKey{}, &private), next, nil
+}
+
+func (r *openAIAgentRecoveryRequest) matchesReplayInput(account *Account, body []byte, expected [32]byte) bool {
+	digest := openAIAgentRecoveryInputDigest(body)
+	if digest == expected {
+		return true
+	}
+	return r != nil && r.disableOwnerBinding && !r.omittedHistory && !r.omitted400History &&
+		r.nativeReplayPrepared && account != nil && r.nativeAccountID == account.ID &&
+		slices.Contains(r.nativeCompatInputs, digest)
+}
+
+// Compatibility may change representation without changing the task: HTTP
+// namespace cleanup, OAuth system promotion and reserved tool aliases are normal
+// builders. Compute their finite expected forms before dispatch so an unrelated
+// edit, dropped result or changed ciphertext still cannot become trusted input.
+func (s *OpenAIGatewayService) openAIAgentReplayCompatibleInputs(account *Account, source []byte, transport string, compact bool) ([][32]byte, error) {
+	inputs := [][32]byte{openAIAgentRecoveryInputDigest(source)}
+	remember := func(body []byte) {
+		digest := openAIAgentRecoveryInputDigest(body)
+		if !slices.Contains(inputs, digest) {
+			inputs = append(inputs, digest)
+		}
+	}
+	projected := source
+	var err error
+	if transport == "ws" {
+		projected, _, err = normalizeOpenAIResponsesCompatibilityBodyWithOptions(projected, account, openAIResponsesCompatibilityOptions{
+			Config: s.cfg, ResponsesLite: isOpenAIResponsesLiteWebSocketPayload(projected), Compact: compact, PreserveInput: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if account.IsOpenAIOAuthLike() {
+			projected, _, _, err = aliasOpenAIOAuthReservedToolNamesBody(projected)
+			if err != nil {
+				return nil, err
+			}
+		}
+		remember(projected)
+	}
+	// A WS turn can use the native HTTP bridge. Its input still starts from the
+	// same prepared frame; transport selection does not authorize task replay.
+	if shouldFlattenOpenAIResponsesNamespaces(account, OpenAIUpstreamTransportHTTPSSE, false, compact) {
+		projected, err = flattenOpenAIResponsesNamespaces(nil, projected)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if shouldStripOpenAIResponsesInputNamespaces(account, OpenAIUpstreamTransportHTTPSSE, false) {
+		keep := shouldKeepOpenAIResponsesToolCallNamespaces(account, OpenAIUpstreamTransportHTTPSSE, false, compact, projected)
+		projected, err = stripOpenAIResponsesInputNamespaces(projected, keep)
+		if err != nil {
+			return nil, err
+		}
+	}
+	remember(projected)
+	if transport == "http" && account.UsesOpenAICodexProtocol() {
+		var decoded map[string]any
+		if err := decodeOpenAIJSONUseNumber(projected, &decoded); err != nil {
+			return nil, err
+		}
+		result := applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
+			IsCompact: compact, SkipDefaultInstructions: true, PreserveReadableReplay: true,
+			PreserveToolCallIDs: isOpenAICompatMessagesBridgeRequestBody(decoded),
+		})
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		projected, err = marshalOpenAIUpstreamJSON(decoded)
+		if err != nil {
+			return nil, err
+		}
+		remember(projected)
+	}
+	return inputs, nil
 }
 
 func (s *OpenAIGatewayService) projectOpenAIAgentAccountReplay(ctx context.Context, account *Account, source []byte, transport string) ([]byte, error) {

@@ -30,9 +30,9 @@ type issue842FaultCache struct {
 	client *redis.Client
 }
 
-// Exercise actual account builders after the handler has frozen the complete
-// input. These rewrites have semantics and are outside the metadata allowlist.
-func TestIssue842HTTPBuilderChangesStopBeforeNetwork(t *testing.T) {
+// Normal transport compatibility is derived from the frozen history before
+// builders run. It must preserve the task, ciphertext and executed tool results.
+func TestIssue842HTTPBuilderCompatibilityKeepsHistory(t *testing.T) {
 	for _, kind := range []string{service.AccountTypeAPIKey, service.AccountTypeOAuth} {
 		for _, change := range []string{"namespace", "timezone", "system_promotion"} {
 			if kind == service.AccountTypeAPIKey && change == "system_promotion" {
@@ -80,12 +80,20 @@ func TestIssue842HTTPBuilderChangesStopBeforeNetwork(t *testing.T) {
 					require.Equal(t, "9007199254740993", gjson.GetBytes(u.frames[0], "input.1.sequence").Raw)
 					return
 				}
-				require.Equal(t, http.StatusConflict, answer.Code, answer.Body.String())
-				require.Contains(t, answer.Body.String(), "encrypted_agent_recovery_wire_changed")
+				require.Equal(t, http.StatusOK, answer.Code, answer.Body.String())
+				require.NotContains(t, answer.Body.String(), "encrypted_agent_recovery_wire_changed")
+				if change == "system_promotion" {
+					want, err = sjson.Set(want, "input.1.role", "developer")
+					require.NoError(t, err)
+				}
 				u.mu.Lock()
 				defer u.mu.Unlock()
-				require.Empty(t, u.frames, "a gateway builder cannot rebase trust onto its changed input")
-				require.Empty(t, issue805Owners(t, clients()))
+				require.Len(t, u.frames, 1)
+				require.JSONEq(t, gjson.Get(want, "input").Raw, gjson.GetBytes(u.frames[0], "input").Raw)
+				require.Equal(t, "9007199254740993", gjson.GetBytes(u.frames[0], "input.1.sequence").Raw)
+				if change == "system_promotion" {
+					require.Contains(t, gjson.GetBytes(u.frames[0], "instructions").String(), "Keep ledger balance 11")
+				}
 			})
 		}
 	}
